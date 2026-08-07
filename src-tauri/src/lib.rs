@@ -61,13 +61,20 @@ fn get_history(state: State<Mutex<Store>>) -> Vec<ClipItem> {
 }
 
 #[tauri::command]
-fn copy_item(id: String, state: State<Mutex<Store>>) -> Result<(), String> {
+fn copy_item(
+    id: String,
+    state: State<Mutex<Store>>,
+    clipboard: State<Mutex<arboard::Clipboard>>,
+) -> Result<(), String> {
     let item = {
         let store = state.lock().unwrap();
         store.get(&id).ok_or_else(|| "item not found".to_string())?
     };
-    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-    cb.set_text(item.text.clone()).map_err(|e| e.to_string())?;
+    clipboard
+        .lock()
+        .unwrap()
+        .set_text(item.text.clone())
+        .map_err(|e| e.to_string())?;
     state.lock().unwrap().add(item.text.clone(), item.kind.clone());
     Ok(())
 }
@@ -128,6 +135,17 @@ fn is_terminal(class: &str) -> bool {
 }
 
 #[cfg(target_os = "linux")]
+fn activate_window(id: &str) {
+    let _ = std::process::Command::new("xdotool")
+        .args(["windowactivate", "--sync", id])
+        .status();
+    let _ = std::process::Command::new("xdotool")
+        .args(["windowfocus", "--sync", id])
+        .status();
+    std::thread::sleep(Duration::from_millis(100));
+}
+
+#[cfg(target_os = "linux")]
 fn paste_into_terminal(text: &str, target: Option<&str>) {
     if let Ok(mut child) = std::process::Command::new("xclip")
         .args(["-selection", "primary"])
@@ -140,10 +158,7 @@ fn paste_into_terminal(text: &str, target: Option<&str>) {
         let _ = child.wait();
 
         if let Some(id) = target {
-            let _ = std::process::Command::new("xdotool")
-                .args(["windowactivate", id])
-                .status();
-            std::thread::sleep(Duration::from_millis(50));
+            activate_window(id);
             let _ = std::process::Command::new("xdotool")
                 .args(["click", "--window", id, "2"])
                 .status();
@@ -159,7 +174,7 @@ fn paste_into_terminal(text: &str, target: Option<&str>) {
 
 fn send_paste_key(text: String, prev_window: Option<String>) {
     let _ = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(150));
+        std::thread::sleep(Duration::from_millis(200));
         #[cfg(target_os = "linux")]
         {
             let target = prev_window.filter(|s| !s.is_empty());
@@ -168,10 +183,7 @@ fn send_paste_key(text: String, prev_window: Option<String>) {
                 paste_into_terminal(&text, target.as_deref());
             } else {
                 if let Some(id) = &target {
-                    let _ = std::process::Command::new("xdotool")
-                        .args(["windowactivate", id])
-                        .status();
-                    std::thread::sleep(Duration::from_millis(50));
+                    activate_window(id);
                 }
                 let _ = std::process::Command::new("xdotool")
                     .args(["key", "--clearmodifiers", "ctrl+v"])
@@ -201,23 +213,37 @@ fn send_paste_key(text: String, prev_window: Option<String>) {
 }
 
 #[tauri::command]
-fn paste_item(id: String, app: tauri::AppHandle, state: State<Mutex<Store>>) -> Result<(), String> {
+fn paste_item(
+    id: String,
+    app: tauri::AppHandle,
+    state: State<Mutex<Store>>,
+    clipboard: State<Mutex<arboard::Clipboard>>,
+) -> Result<(), String> {
     let item = {
         let store = state.lock().unwrap();
         store.get(&id).ok_or_else(|| "item not found".to_string())?
     };
-    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-    cb.set_text(item.text.clone()).map_err(|e| e.to_string())?;
+    clipboard
+        .lock()
+        .unwrap()
+        .set_text(item.text.clone())
+        .map_err(|e| e.to_string())?;
     state.lock().unwrap().add(item.text.clone(), item.kind.clone());
 
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.hide();
-    }
     let prev_window = app
         .state::<Mutex<Option<String>>>()
         .lock()
         .unwrap()
         .clone();
+
+    #[cfg(target_os = "linux")]
+    if let Some(id) = prev_window.as_deref().filter(|s| !s.is_empty()) {
+        activate_window(id);
+    }
+
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.hide();
+    }
     send_paste_key(item.text.clone(), prev_window);
     Ok(())
 }
@@ -258,15 +284,18 @@ pub fn run() {
             let store = Store::new(app.path().app_data_dir()?.join("history.json"));
             app.manage(Mutex::new(store));
             app.manage(Mutex::new(None::<String>));
+            app.manage(Mutex::new(
+                arboard::Clipboard::new().expect("failed to init clipboard"),
+            ));
             watcher::start(app.handle().clone());
 
-            let open = MenuItem::with_id(app, "open", "Open ClipMate", true, None::<&str>)?;
+            let open = MenuItem::with_id(app, "open", "Open Superclip", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open, &quit])?;
 
-            let _tray = TrayIconBuilder::with_id("clipmate-tray")
+            let _tray = TrayIconBuilder::with_id("superclip-tray")
                 .icon(app.default_window_icon().unwrap().clone())
-                .tooltip("ClipMate")
+                .tooltip("Superclip")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id().as_ref() {

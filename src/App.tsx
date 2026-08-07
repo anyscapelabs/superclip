@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import Fuse from "fuse.js";
 import "./App.css";
 import SearchBar from "./components/SearchBar";
 import Clipboard from "./components/Clipboard";
@@ -18,6 +19,7 @@ function relTime(ts: number): string {
 function App() {
   const [items, setItems] = useState<ClipItem[]>([]);
   const [selected, setSelected] = useState(0);
+  const [query, setQuery] = useState("");
 
   const refresh = useCallback(async () => {
     setItems(await invoke<ClipItem[]>("get_history"));
@@ -31,9 +33,24 @@ function App() {
     };
   }, [refresh]);
 
+  const filtered = useMemo(() => {
+    const q = query.trim();
+    if (!q) return items;
+    const fuse = new Fuse(items, {
+      keys: ["text"],
+      threshold: 0.35,
+      ignoreLocation: true,
+    });
+    return fuse.search(q).map((r) => r.item);
+  }, [items, query]);
+
   useEffect(() => {
-    if (selected >= items.length) setSelected(Math.max(0, items.length - 1));
-  }, [items, selected]);
+    setSelected(0);
+  }, [query]);
+
+  useEffect(() => {
+    if (selected >= filtered.length) setSelected(Math.max(0, filtered.length - 1));
+  }, [filtered.length, selected]);
 
   const paste = useCallback(
     (id: string) => {
@@ -49,13 +66,13 @@ function App() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        setSelected((s) => Math.min(s + 1, items.length - 1));
+        setSelected((s) => Math.min(s + 1, filtered.length - 1));
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
         setSelected((s) => Math.max(s - 1, 0));
-      } else if (e.key === "Enter" && items[selected]) {
+      } else if (e.key === "Enter" && filtered[selected]) {
         e.preventDefault();
-        paste(items[selected].id);
+        paste(filtered[selected].id);
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "x") {
         e.preventDefault();
         invoke("clear_history").then(refresh);
@@ -63,16 +80,16 @@ function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [items, selected, paste, refresh]);
+  }, [filtered, selected, paste, refresh]);
 
   return (
     <main className="app">
       <div className="glass">
         <div className="border-b border-white/5 px-3 pt-4 pb-3">
-          <SearchBar />
+          <SearchBar value={query} onChange={setQuery} />
         </div>
         <Clipboard
-          items={items}
+          items={filtered}
           selected={selected}
           onSelect={setSelected}
           onItemClick={paste}
@@ -80,7 +97,7 @@ function App() {
         />
         <Footer
           count={items.length}
-          onPaste={() => items[selected] && paste(items[selected].id)}
+          onPaste={() => filtered[selected] && paste(filtered[selected].id)}
           onClear={() => invoke("clear_history").then(refresh)}
         />
       </div>
