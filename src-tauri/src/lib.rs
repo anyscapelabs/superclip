@@ -135,13 +135,34 @@ fn is_terminal(class: &str) -> bool {
 }
 
 #[cfg(target_os = "linux")]
+fn paste_log(msg: &str) {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/superclip-paste.log")
+    {
+        let ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let _ = writeln!(f, "{ms}: {msg}");
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn activate_window(id: &str) {
-    let _ = std::process::Command::new("xdotool")
+    let act = std::process::Command::new("xdotool")
         .args(["windowactivate", "--sync", id])
         .status();
-    let _ = std::process::Command::new("xdotool")
+    let foc = std::process::Command::new("xdotool")
         .args(["windowfocus", "--sync", id])
         .status();
+    paste_log(&format!(
+        "activate id={id} windowactivate={:?} windowfocus={:?}",
+        act.map(|s| s.success()),
+        foc.map(|s| s.success())
+    ));
     std::thread::sleep(Duration::from_millis(100));
 }
 
@@ -179,15 +200,34 @@ fn send_paste_key(text: String, prev_window: Option<String>) {
         {
             let target = prev_window.filter(|s| !s.is_empty());
             let class = target.as_deref().map(window_class).unwrap_or_default();
+            paste_log(&format!(
+                "send_paste_key target={target:?} class={class:?}"
+            ));
             if is_terminal(&class) {
                 paste_into_terminal(&text, target.as_deref());
             } else {
                 if let Some(id) = &target {
                     activate_window(id);
                 }
-                let _ = std::process::Command::new("xdotool")
-                    .args(["key", "--clearmodifiers", "ctrl+v"])
+                paste_log("before getactivewindow");
+                let active = std::process::Command::new("xdotool")
+                    .args(["getactivewindow"])
+                    .output();
+                paste_log(&format!("getactivewindow raw={active:?}"));
+                let active = active
+                    .ok()
+                    .and_then(|o| String::from_utf8(o.stdout).ok())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                paste_log("before key ctrl+v");
+                let key = std::process::Command::new("xdotool")
+                    .args(["key", "ctrl+v"])
                     .status();
+                paste_log(&format!(
+                    "focused_after_activate={active} key_status={:?}",
+                    key.map(|s| s.success())
+                ));
             }
         }
         #[cfg(target_os = "windows")]
