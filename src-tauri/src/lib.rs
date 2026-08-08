@@ -6,7 +6,7 @@ use std::time::Duration;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, PhysicalPosition, State, WindowEvent,
+    Emitter, Manager, PhysicalPosition, State, WindowEvent,
 };
 
 mod detect;
@@ -323,6 +323,8 @@ fn clear_history(state: State<Mutex<Store>>) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
@@ -348,8 +350,15 @@ pub fn run() {
             watcher::start(app.handle().clone());
 
             let open = MenuItem::with_id(app, "open", "Open Superclip", true, None::<&str>)?;
+            let check_update = MenuItem::with_id(
+                app,
+                "check_update",
+                "Check for Updates…",
+                true,
+                None::<&str>,
+            )?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &quit])?;
+            let menu = Menu::with_items(app, &[&open, &check_update, &quit])?;
 
             let _tray = TrayIconBuilder::with_id("superclip-tray")
                 .icon(app.default_window_icon().unwrap().clone())
@@ -359,6 +368,16 @@ pub fn run() {
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "open" => {
                         let _ = toggle_window(app);
+                    }
+                    // Ask the frontend to run the update flow (check → download → install
+                    // → relaunch). Show the dedicated updater window first so the
+                    // user gets a clear, separate status card.
+                    "check_update" => {
+                        if let Some(win) = app.get_webview_window("updater") {
+                            let _ = win.show();
+                            let _ = win.set_focus();
+                        }
+                        let _ = app.emit("updater:check", ());
                     }
                     "quit" => app.exit(0),
                     _ => {}
