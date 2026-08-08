@@ -1,12 +1,12 @@
-# ClipMate
+# Superclip
 
 A clipboard manager you can actually read the source of. Under 1,000 lines, no telemetry, no cloud — just your clipboard, remembered.
 
-ClipMate sits quietly in your system tray. Copy things as normal. Hit a hotkey, and your recent clipboard history shows up in a small window. Click an item to copy it again. That's the whole app.
+Superclip sits quietly in your system tray. Copy things as normal. Hit a hotkey, and your recent clipboard history shows up in a small window. Click an item to copy it again. That's the whole app.
 
 ## Why
 
-Most clipboard managers are either bloated Electron apps or ask for cloud sync you never wanted. ClipMate is built with [Tauri](https://tauri.app), so it's a native app with a tiny footprint — around 10–15MB, low idle RAM, no background telemetry. Everything is stored in a local JSON file on your machine and nothing ever leaves it.
+Most clipboard managers are either bloated Electron apps or ask for cloud sync you never wanted. Superclip is built with [Tauri](https://tauri.app), so it's a native app with a tiny footprint — around 10–15MB, low idle RAM, no background telemetry. Everything is stored in a local JSON file on your machine and nothing ever leaves it.
 
 ## Features
 
@@ -28,8 +28,8 @@ Download the latest build for your OS from [Releases](../../releases) and run th
 Requires [Rust](https://www.rust-lang.org/tools/install) and [Node.js](https://nodejs.org/) / [Bun](https://bun.sh).
 
 ```bash
-git clone https://github.com/anyscapelabs/clipmate.git
-cd clipmate
+git clone https://github.com/anyscapelabs/superclip.git
+cd superclip
 bun install
 bun run tauri dev      # run in development
 bun run tauri build    # produce a release binary
@@ -37,11 +37,11 @@ bun run tauri build    # produce a release binary
 
 ## Usage
 
-1. Launch ClipMate — it starts in your system tray.
+1. Launch Superclip — it starts in your system tray.
 2. Copy something, anywhere.
 3. Press `Ctrl+Shift+V` to open your history.
 4. Click an item to paste it back, or press Enter. Arrows navigate, `Ctrl+X` clears.
-5. Right-click the tray icon to open ClipMate or quit.
+5. Right-click the tray icon to open Superclip or quit.
 
 ## How it works
 
@@ -61,7 +61,7 @@ bun run tauri build    # produce a release binary
 
 ## Privacy
 
-ClipMate never sends data anywhere. There is no analytics, no update-check ping, no cloud sync. Your clipboard history lives in a single local file you can open, inspect, or delete at any time.
+Superclip never sends data anywhere. There is no analytics, no update-check ping, no cloud sync. Your clipboard history lives in a single local file you can open, inspect, or delete at any time.
 
 ## Contributing
 

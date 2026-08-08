@@ -23,7 +23,7 @@ function Clipboard({ items, selected, onSelect, onItemClick, relTime }: Props) {
       <h2 className="pl-[18px] pr-3 pt-2 pb-1 mt-2 text-xs font-medium uppercase tracking-wider text-white/40">
         Recent
       </h2>
-      <ul className="clipmate-scroll min-h-0 flex-1 overflow-y-auto p-1.5 pt-0">
+      <ul className="superclip-scroll min-h-0 flex-1 overflow-y-auto p-1.5 pt-0">
         {items.length === 0 && (
           <li className="px-3 py-2 text-[14px] text-white/35">
             No clipboard items yet — copy something!
