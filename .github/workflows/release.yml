@@ -7,8 +7,24 @@ on:
 
 jobs:
   release:
-    name: Build and publish release
-    runs-on: ubuntu-latest
+    name: Build and publish release (${{ matrix.platform.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - os: ubuntu-latest
+            target: linux
+            args: "--bundles deb,appimage,rpm"
+          - os: windows-latest
+            target: windows
+            args: ""
+          - os: macos-latest
+            target: macos
+            args: "--target aarch64-apple-darwin"
+          - os: macos-latest
+            target: macos-x86_64
+            args: "--target x86_64-apple-darwin"
+    runs-on: ${{ matrix.platform.os }}
     permissions:
       contents: write
     env:
@@ -19,6 +35,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -33,6 +50,8 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.os == 'macos-latest' && 'aarch64-apple-darwin x86_64-apple-darwin' || '' }}
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -46,6 +65,8 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Superclip ${{ github.ref_name }}"
@@ -53,6 +74,10 @@ jobs:
             ## Superclip ${{ github.ref_name }}
 
             Download the package for your platform from the assets below.
-            Linux AppImage/DEB/RPM bundles are provided on this release.
+            - **Windows**: `.msi` or `.exe` installer
+            - **macOS (Apple Silicon)**: `.dmg` / `.app` for `aarch64`
+            - **macOS (Intel)**: `.dmg` / `.app` for `x86_64`
+            - **Linux**: AppImage / DEB / RPM
           releaseDraft: true
           prerelease: false
+          args: ${{ matrix.platform.args }}
