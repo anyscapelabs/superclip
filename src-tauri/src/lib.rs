@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -13,6 +14,20 @@ mod store;
 mod watcher;
 
 use store::{ClipItem, Store};
+
+// --- Paste timing & retry -------------------------------------------------
+// Initial delay after the picker hides: gives the WM time to release X input
+// focus from the picker before we re-focus the target app. Too short and the
+// activation races the hide.
+const INITIAL_PASTE_DELAY: Duration = Duration::from_millis(200);
+// Settle time after a WM-level focus change. Chromium/Electron pages can lag
+// behind the WM: the window is active but the page's focused element isn't
+// ready to accept a paste yet.
+const FOCUS_SETTLE_DELAY: Duration = Duration::from_millis(100);
+// Bounded focus-verification retries. We re-check that the target window
+// actually has focus (a successful `windowactivate` is not proof of focus),
+// retry once, then give up rather than polling forever.
+const MAX_FOCUS_ATTEMPTS: u32 = 2;
 
 fn center_on_primary(win: &tauri::WebviewWindow) -> tauri::Result<()> {
     if let Some(monitor) = win.primary_monitor()? {
@@ -81,6 +96,9 @@ fn copy_item(
 
 #[cfg(target_os = "linux")]
 fn active_window_id() -> Option<String> {
+    // NOTE: a browser window with multiple tabs is a single X11 window — all
+    // tabs share one window id. We can only target the window, not a specific
+    // tab, so a paste lands in whichever tab is focused/visible at paste time.
     let out = std::process::Command::new("xdotool")
         .args(["getactivewindow"])
         .output()
@@ -93,7 +111,10 @@ fn active_window_id() -> Option<String> {
     }
 }
 
+// Reads WM_CLASS via xprop. Kept (unused) for v0.2 terminal-paste support,
+// which needs it to distinguish terminal apps from GUI apps. Do not delete.
 #[cfg(target_os = "linux")]
+#[allow(dead_code)]
 fn window_class(id: &str) -> String {
     std::process::Command::new("xprop")
         .args(["-id", id, "WM_CLASS"])
@@ -106,52 +127,40 @@ fn window_class(id: &str) -> String {
 }
 
 #[cfg(target_os = "linux")]
-fn is_terminal(class: &str) -> bool {
-    const TERMS: &[&str] = &[
-        "gnome-terminal",
-        "gnome.terminal",
-        "org.gnome.terminal",
-        "x-terminal",
-        "konsole",
-        "xterm",
-        "uxterm",
-        "alacritty",
-        "kitty",
-        "wezterm",
-        "terminator",
-        "tilix",
-        "st",
-        "urxvt",
-        "rxvt",
-        "foot",
-        "ghostty",
-        "xfce4-terminal",
-        "lxterminal",
-        "mate-terminal",
-        "pantheon-terminal",
-        "contour",
-    ];
-    TERMS.iter().any(|t| class.contains(t)) || class.contains("terminal")
-}
+static PASTE_LOG_FAILED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(target_os = "linux")]
 fn paste_log(msg: &str) {
     use std::time::{SystemTime, UNIX_EPOCH};
-    if let Ok(mut f) = std::fs::OpenOptions::new()
+    match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open("/tmp/superclip-paste.log")
     {
-        let ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let _ = writeln!(f, "{ms}: {msg}");
+        Ok(mut f) => {
+            let ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let _ = writeln!(f, "{ms}: {msg}");
+        }
+        Err(e) => {
+            // Fail loudly exactly once per app run so a broken/unwritable log
+            // can't silently fool a debugging session, but never crash the
+            // paste feature itself.
+            if !PASTE_LOG_FAILED.swap(true, Ordering::SeqCst) {
+                eprintln!("superclip: warning: cannot write /tmp/superclip-paste.log: {e}");
+            }
+        }
     }
 }
 
 #[cfg(target_os = "linux")]
 fn activate_window(id: &str) {
+    // windowactivate --sync blocks until the WM has raised+activated the
+    // window; windowfocus --sync then pins X input focus to it so synthetic
+    // keys land on the right app. Neither returning Ok proves focus landed —
+    // send_synthetic_paste verifies that separately.
     let act = std::process::Command::new("xdotool")
         .args(["windowactivate", "--sync", id])
         .status();
@@ -163,72 +172,74 @@ fn activate_window(id: &str) {
         act.map(|s| s.success()),
         foc.map(|s| s.success())
     ));
-    std::thread::sleep(Duration::from_millis(100));
+    std::thread::sleep(FOCUS_SETTLE_DELAY);
 }
 
 #[cfg(target_os = "linux")]
-fn paste_into_terminal(text: &str, target: Option<&str>) {
-    if let Ok(mut child) = std::process::Command::new("xclip")
-        .args(["-selection", "primary"])
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-    {
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(text.as_bytes());
-        }
-        let _ = child.wait();
-
-        if let Some(id) = target {
-            activate_window(id);
-            let _ = std::process::Command::new("xdotool")
-                .args(["click", "--window", id, "2"])
-                .status();
-        } else {
-            let _ = std::process::Command::new("xdotool").args(["click", "2"]).status();
-        }
-        return;
+fn focused_window_id() -> Option<String> {
+    let out = std::process::Command::new("xdotool")
+        .args(["getactivewindow"])
+        .output()
+        .ok()?;
+    let id = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    paste_log(&format!("getactivewindow => {id:?}"));
+    if id.is_empty() {
+        None
+    } else {
+        Some(id)
     }
-    let _ = std::process::Command::new("xdotool").args(["keydown", "ctrl+shift"]).status();
-    let _ = std::process::Command::new("xdotool").args(["key", "v"]).status();
-    let _ = std::process::Command::new("xdotool").args(["keyup", "ctrl+shift"]).status();
 }
 
-fn send_paste_key(text: String, prev_window: Option<String>) {
-    let _ = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(200));
+#[cfg(target_os = "linux")]
+fn send_synthetic_paste(target: Option<&str>) {
+    // Terminal paste (xclip PRIMARY + middle-click) is deferred to v0.2; this
+    // phase only handles browsers and GUI apps via a synthetic Ctrl+V.
+    let Some(id) = target.map(str::trim).filter(|s| !s.is_empty()) else {
+        // We never learned which window the user was in before opening the
+        // picker (active_window_id() failed). Best we can do is paste into
+        // whatever currently has focus; keep it explicit in the log.
+        paste_log("no target window captured, falling back to ambient focus paste");
+        let key = std::process::Command::new("xdotool")
+            .args(["key", "ctrl+v"])
+            .status();
+        paste_log(&format!("ambient key status={:?}", key.map(|s| s.success())));
+        return;
+    };
+
+    // A browser window with multiple tabs is a single X11 window — all tabs
+    // share one window id. We can only target the window, not a specific tab,
+    // so the paste lands in whichever tab is actually focused at paste time.
+    let mut attempts: u32 = 0;
+    loop {
+        attempts += 1;
+        activate_window(id);
+        let focused = focused_window_id();
+        if focused.as_deref() == Some(id) {
+            break;
+        }
+        paste_log(&format!("focus mismatch: focused={focused:?} want={id} attempt={attempts}"));
+        if attempts >= MAX_FOCUS_ATTEMPTS {
+            break;
+        }
+    }
+
+    // Send Ctrl+V directly to the target window (XSendEvent, so it does not
+    // depend on a keyboard grab / XTEST). Focus was verified above, so this is
+    // belt-and-suspenders on top of a focused-window send.
+    let key = std::process::Command::new("xdotool")
+        .args(["key", "--window", id, "ctrl+v"])
+        .status();
+    paste_log(&format!("key --window {id} ctrl+v status={:?}", key.map(|s| s.success())));
+}
+
+fn send_paste_key(prev_window: Option<String>) {
+    std::thread::spawn(move || {
+        std::thread::sleep(INITIAL_PASTE_DELAY);
         #[cfg(target_os = "linux")]
         {
             let target = prev_window.filter(|s| !s.is_empty());
-            let class = target.as_deref().map(window_class).unwrap_or_default();
-            paste_log(&format!(
-                "send_paste_key target={target:?} class={class:?}"
-            ));
-            if is_terminal(&class) {
-                paste_into_terminal(&text, target.as_deref());
-            } else {
-                if let Some(id) = &target {
-                    activate_window(id);
-                }
-                paste_log("before getactivewindow");
-                let active = std::process::Command::new("xdotool")
-                    .args(["getactivewindow"])
-                    .output();
-                paste_log(&format!("getactivewindow raw={active:?}"));
-                let active = active
-                    .ok()
-                    .and_then(|o| String::from_utf8(o.stdout).ok())
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string();
-                paste_log("before key ctrl+v");
-                let key = std::process::Command::new("xdotool")
-                    .args(["key", "ctrl+v"])
-                    .status();
-                paste_log(&format!(
-                    "focused_after_activate={active} key_status={:?}",
-                    key.map(|s| s.success())
-                ));
-            }
+            paste_log(&format!("send_paste_key target={target:?}"));
+            send_synthetic_paste(target.as_deref());
         }
         #[cfg(target_os = "windows")]
         {
@@ -276,15 +287,12 @@ fn paste_item(
         .unwrap()
         .clone();
 
-    #[cfg(target_os = "linux")]
-    if let Some(id) = prev_window.as_deref().filter(|s| !s.is_empty()) {
-        activate_window(id);
-    }
-
+    // Exactly one activation happens per paste, inside the async paste flow
+    // (send_synthetic_paste). Doing it here too would race the picker hide.
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.hide();
     }
-    send_paste_key(item.text.clone(), prev_window);
+    send_paste_key(prev_window);
     Ok(())
 }
 
