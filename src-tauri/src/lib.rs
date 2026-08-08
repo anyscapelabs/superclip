@@ -90,7 +90,10 @@ fn copy_item(
         .unwrap()
         .set_text(item.text.clone())
         .map_err(|e| e.to_string())?;
-    state.lock().unwrap().add(item.text.clone(), item.kind.clone());
+    state
+        .lock()
+        .unwrap()
+        .add(item.text.clone(), item.kind.clone());
     Ok(())
 }
 
@@ -202,7 +205,10 @@ fn send_synthetic_paste(target: Option<&str>) {
         let key = std::process::Command::new("xdotool")
             .args(["key", "ctrl+v"])
             .status();
-        paste_log(&format!("ambient key status={:?}", key.map(|s| s.success())));
+        paste_log(&format!(
+            "ambient key status={:?}",
+            key.map(|s| s.success())
+        ));
         return;
     };
 
@@ -217,7 +223,9 @@ fn send_synthetic_paste(target: Option<&str>) {
         if focused.as_deref() == Some(id) {
             break;
         }
-        paste_log(&format!("focus mismatch: focused={focused:?} want={id} attempt={attempts}"));
+        paste_log(&format!(
+            "focus mismatch: focused={focused:?} want={id} attempt={attempts}"
+        ));
         if attempts >= MAX_FOCUS_ATTEMPTS {
             break;
         }
@@ -229,7 +237,10 @@ fn send_synthetic_paste(target: Option<&str>) {
     let key = std::process::Command::new("xdotool")
         .args(["key", "--window", id, "ctrl+v"])
         .status();
-    paste_log(&format!("key --window {id} ctrl+v status={:?}", key.map(|s| s.success())));
+    paste_log(&format!(
+        "key --window {id} ctrl+v status={:?}",
+        key.map(|s| s.success())
+    ));
 }
 
 fn send_paste_key(prev_window: Option<String>) {
@@ -279,13 +290,12 @@ fn paste_item(
         .unwrap()
         .set_text(item.text.clone())
         .map_err(|e| e.to_string())?;
-    state.lock().unwrap().add(item.text.clone(), item.kind.clone());
-
-    let prev_window = app
-        .state::<Mutex<Option<String>>>()
+    state
         .lock()
         .unwrap()
-        .clone();
+        .add(item.text.clone(), item.kind.clone());
+
+    let prev_window = app.state::<Mutex<Option<String>>>().lock().unwrap().clone();
 
     // Exactly one activation happens per paste, inside the async paste flow
     // (send_synthetic_paste). Doing it here too would race the picker hide.
