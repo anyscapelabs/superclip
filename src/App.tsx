@@ -35,13 +35,18 @@ function App() {
 
   const filtered = useMemo(() => {
     const q = query.trim();
-    if (!q) return items;
-    const fuse = new Fuse(items, {
-      keys: ["text"],
-      threshold: 0.35,
-      ignoreLocation: true,
-    });
-    return fuse.search(q).map((r) => r.item);
+    let src = items;
+    if (q) {
+      const fuse = new Fuse(items, {
+        keys: ["text"],
+        threshold: 0.35,
+        ignoreLocation: true,
+      });
+      src = fuse.search(q).map((r) => r.item);
+    }
+    // Pinned items always render above the recent list, keeping their own
+    // relative order.
+    return [...src.filter((i) => i.pinned), ...src.filter((i) => !i.pinned)];
   }, [items, query]);
 
   useEffect(() => {
@@ -58,6 +63,13 @@ function App() {
         refresh();
         setSelected(0);
       });
+    },
+    [refresh],
+  );
+
+  const togglePin = useCallback(
+    (id: string) => {
+      invoke("toggle_pin", { id }).then(refresh);
     },
     [refresh],
   );
@@ -93,6 +105,7 @@ function App() {
           selected={selected}
           onSelect={setSelected}
           onItemClick={paste}
+          onTogglePin={togglePin}
           relTime={relTime}
         />
         <Footer
