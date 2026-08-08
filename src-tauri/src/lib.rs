@@ -58,7 +58,7 @@ fn toggle_window(app: &tauri::AppHandle) -> tauri::Result<()> {
             win.set_focus()?;
 
             #[cfg(target_os = "macos")]
-            app.activate();
+            let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
 
             let win_clone = win.clone();
             std::thread::spawn(move || {
