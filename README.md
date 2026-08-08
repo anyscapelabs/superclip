@@ -6,6 +6,8 @@ Superclip sits quietly in your system tray. Copy things as normal. Hit a hotkey,
 
 If Superclip saves you a keystroke, give it a star ⭐ — it helps more people find it.
 
+![Superclip demo](public/demo.gif)
+
 ## Install
 
 Download the latest build for your OS from [Releases](https://github.com/anyscapelabs/superclip/releases) and run the installer (Windows `.exe`, macOS `.dmg`, Linux AppImage/DEB/RPM).
