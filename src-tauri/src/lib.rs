@@ -8,6 +8,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager, PhysicalPosition, State, WindowEvent,
 };
+use tauri_plugin_autostart::ManagerExt;
 
 mod detect;
 mod store;
@@ -324,6 +325,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--from-autostart"]),
+        ))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -348,6 +353,13 @@ pub fn run() {
                 arboard::Clipboard::new().expect("failed to init clipboard"),
             ));
             watcher::start(app.handle().clone());
+
+            // Start quietly with the OS on login (enabled once unless the user
+            // has explicitly turned it off). The window stays hidden and the
+            // app keeps living in the system tray.
+            if !std::env::args().any(|a| a == "--from-autostart") {
+                let _ = app.autolaunch().enable();
+            }
 
             let open = MenuItem::with_id(app, "open", "Open Superclip", true, None::<&str>)?;
             let check_update = MenuItem::with_id(
