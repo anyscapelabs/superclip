@@ -14,6 +14,26 @@ Download the latest build for your OS from [Releases](https://github.com/anyscap
 
 **[Install guide →](docs/usage.md)**
 
+### Linux dependencies (Wayland)
+
+On Wayland sessions (GNOME, KDE, Sway, …) Superclip shells out to a couple of
+standard tools for clipboard access and synthetic paste, because the Wayland
+security model forbids apps from injecting input or reading the selection
+directly.
+
+```bash
+# Debian / Ubuntu / Mint
+sudo apt install wl-clipboard ydotool
+
+# Enable the ydotool daemon so Superclip can auto-paste
+sudo systemctl enable --now ydotoold
+sudo usermod -aG input $USER   # log out and back in after this
+```
+
+`ydotool` setup is **optional** — clipboard history still works without it,
+you'll just need to press `Ctrl+V` yourself after picking an item. X11 sessions
+need no extra packages (`xdotool` + `arboard` handle everything there).
+
 ## Features
 
 - **Background clipboard watcher** — captures text copies automatically, deduplicated
@@ -57,9 +77,9 @@ bun run tauri build    # produce a release binary
 
 ## How it works
 
-- A background thread polls the OS clipboard every ~500ms using [`arboard`](https://crates.io/crates/arboard) and hashes each entry to detect changes.
+- A background thread polls the OS clipboard every ~500ms and hashes each entry to detect changes — via `arboard` on X11 sessions and all other OSes, `wl-paste` on Wayland.
 - New entries are appended to a JSON history file in the app's local data directory.
-- Paste focuses the window you were in and synthesizes `Ctrl+V` (via `xdotool` on Linux, SendKeys on Windows, System Events on macOS) with focus verification and retry.
+- Paste focuses the window you were in and synthesizes `Ctrl+V` (via `xdotool`/`XSendEvent` on X11, `ydotool`/`uinput` on Wayland, SendKeys on Windows, System Events on macOS) with focus verification and retry.
 - Text vs code is detected heuristically in the backend.
 - The frontend is plain React + Tailwind talking to the Rust backend through Tauri's command API.
 - A global shortcut (via `tauri-plugin-global-shortcut`) toggles the window without needing focus.
