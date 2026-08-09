@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Native Wayland session support (GNOME, KDE, Sway, …): the clipboard layer is
+  now a `ClipboardBackend` abstraction chosen at startup from
+  `XDG_SESSION_TYPE`. Wayland sessions use `wl-copy`/`wl-paste` for clipboard
+  read/write and `ydotool` (via `uinput`) for synthetic paste; X11 and all
+  other OSes keep the existing `arboard` + `xdotool` path unchanged.
+- `ydotool` auto-paste degrades gracefully when the daemon/tool isn't
+  installed — the item is copied to the clipboard and the app asks the user to
+  press `Ctrl+V` manually instead of failing silently.
+
+### Changed
+- Documented Linux Wayland dependencies (`wl-clipboard`, `ydotool`) in the
+  README, including the `ydotoold` daemon and `input` group setup.
+
 ## [0.1.1] - 2026-08-08
 
 ### Added
