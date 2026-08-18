@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { AiFillCode } from "react-icons/ai";
 import { FaThumbtack } from "react-icons/fa";
 import { TbClipboardTextFilled } from "react-icons/tb";
+import { IoImage } from "react-icons/io5";
 import type { ClipItem } from "../types";
 
 interface Props {
@@ -71,13 +72,20 @@ function Clipboard({ items, selected, onSelect, onItemClick, onTogglePin, relTim
                   className={`shrink-0 ${selected === i ? "text-white/80" : "text-white/50"}`}
                   size={16}
                 />
+              ) : item.type === "image" ? (
+                <IoImage
+                  className={`shrink-0 ${selected === i ? "text-white/80" : "text-white/50"}`}
+                  size={16}
+                />
               ) : (
                 <TbClipboardTextFilled
                   className={`shrink-0 ${selected === i ? "text-white/80" : "text-white/50"}`}
                   size={16}
                 />
               )}
-              <span className="min-w-0 flex-1 truncate">{item.text}</span>
+              <span className="min-w-0 flex-1 truncate">
+                {item.type === "image" ? item.image?.name || "Image" : item.text}
+              </span>
               <button
                 type="button"
                 aria-label={item.pinned ? "Unpin item" : "Pin item"}

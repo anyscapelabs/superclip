@@ -5,9 +5,11 @@ All notable changes to Superclip are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.2-beta.0] - 2026-08-18
 
 ### Added
+- Keyboard shortcut `Ctrl+P` / `Cmd+P` pins the currently selected item
+  (the footer hint already advertised it, but it was never wired up).
 - Native Wayland session support (GNOME, KDE, Sway, …): the clipboard layer is
   now a `ClipboardBackend` abstraction chosen at startup from
   `XDG_SESSION_TYPE`. Wayland sessions use `wl-copy`/`wl-paste` for clipboard
@@ -20,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Documented Linux Wayland dependencies (`wl-clipboard`, `ydotool`) in the
   README, including the `ydotoold` daemon and `input` group setup.
+
+### Fixed
+- A stale or second instance holding the `Ctrl+Shift+V` hotkey no longer makes
+  the app panic at startup — the global shortcut registration now degrades
+  gracefully and the app keeps running in the tray instead of crashing.
 
 ## [0.1.1] - 2026-08-08
 

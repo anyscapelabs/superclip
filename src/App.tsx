@@ -88,11 +88,14 @@ function App() {
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "x") {
         e.preventDefault();
         invoke("clear_history").then(refresh);
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p") {
+        e.preventDefault();
+        if (filtered[selected]) togglePin(filtered[selected].id);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [filtered, selected, paste, refresh]);
+  }, [filtered, selected, paste, refresh, togglePin]);
 
   return (
     <main className="app">

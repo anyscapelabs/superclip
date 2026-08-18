@@ -78,12 +78,40 @@ fn copy_item(
         let store = state.lock().unwrap();
         store.get(&id).ok_or_else(|| "item not found".to_string())?
     };
-    clipboard.lock().unwrap().set_text(item.text.as_str())?;
-    state
-        .lock()
-        .unwrap()
-        .add(item.text.clone(), item.kind.clone());
+    {
+        let mut cb = clipboard.lock().unwrap();
+        if let Some(entry) = item.image.as_ref() {
+            let png = state
+                .lock()
+                .unwrap()
+                .image_bytes(&id)
+                .ok_or_else(|| "image file missing".to_string())?;
+            cb.set_image(&png)?;
+            state.lock().unwrap().add_image(
+                &id,
+                &png,
+                entry.width,
+                entry.height,
+                entry.name.clone(),
+            );
+        } else {
+            cb.set_text(item.text.as_str())?;
+            state.lock().unwrap().add_text(&item.text, &item.kind);
+        }
+    }
     Ok(())
+}
+
+/// Returns an item's stored image as a base64-encoded PNG so the frontend can
+/// render a preview without exposing filesystem paths.
+#[tauri::command]
+fn get_image(id: String, state: State<Mutex<Store>>) -> Result<String, String> {
+    use base64::Engine as _;
+    let store = state.lock().unwrap();
+    let png = store
+        .image_bytes(&id)
+        .ok_or_else(|| "image not found".to_string())?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(png))
 }
 
 fn send_paste_key(prev_window: Option<String>, app: tauri::AppHandle) {
@@ -105,11 +133,30 @@ fn paste_item(
         let store = state.lock().unwrap();
         store.get(&id).ok_or_else(|| "item not found".to_string())?
     };
-    clipboard.lock().unwrap().set_text(item.text.as_str())?;
-    state
-        .lock()
-        .unwrap()
-        .add(item.text.clone(), item.kind.clone());
+    // The clipboard is set synchronously (and BEFORE the window hides) so the
+    // target app is guaranteed to find the data when the paste key lands.
+    // Background-threading this made image and text paste flaky.
+    {
+        let mut cb = clipboard.lock().unwrap();
+        if let Some(entry) = item.image.as_ref() {
+            let png = state
+                .lock()
+                .unwrap()
+                .image_bytes(&id)
+                .ok_or_else(|| "image file missing".to_string())?;
+            cb.set_image(&png)?;
+            state.lock().unwrap().add_image(
+                &id,
+                &png,
+                entry.width,
+                entry.height,
+                entry.name.clone(),
+            );
+        } else {
+            cb.set_text(item.text.as_str())?;
+            state.lock().unwrap().add_text(&item.text, &item.kind);
+        }
+    }
 
     let prev_window = app.state::<Mutex<Option<String>>>().lock().unwrap().clone();
 
@@ -221,7 +268,13 @@ pub fn run() {
 
             use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
             let shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyV);
-            app.global_shortcut().register(shortcut)?;
+            // A second instance (e.g. `--from-autostart` plus a manual launch,
+            // or two dev runs) may find the hotkey already taken. Registering
+            // must not bring the whole app down with a panic — the picker stays
+            // reachable from the tray, and only that one instance owns the key.
+            if let Err(e) = app.global_shortcut().register(shortcut) {
+                eprintln!("superclip: hotkey already registered: {e}");
+            }
 
             let win = app.get_webview_window("main").unwrap();
             win.hide()?;
@@ -239,7 +292,8 @@ pub fn run() {
             copy_item,
             paste_item,
             toggle_pin,
-            clear_history
+            clear_history,
+            get_image
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

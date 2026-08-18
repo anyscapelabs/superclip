@@ -1,3 +1,4 @@
+use std::io::Cursor;
 use std::time::Duration;
 
 use super::{paste_log, ClipboardBackend};
@@ -38,6 +39,64 @@ impl ClipboardBackend for X11Backend {
             .ok_or_else(|| "clipboard unavailable (no X11)".to_string())?
             .set_text(text.to_string())
             .map_err(|e| e.to_string())
+    }
+
+    fn get_image(&mut self) -> Result<Option<Vec<u8>>, String> {
+        // arboard only ever requests the image/png target on Linux, which
+        // covers most copies. When it comes up empty — e.g. an app advertising
+        // image/jpeg alone — probe the other raster targets directly via xclip
+        // and normalize whatever we find to PNG.
+        if let Some(cb) = self.clipboard.as_mut() {
+            if let Ok(img) = cb.get_image() {
+                return encode_png(img.width, img.height, &img.bytes).map(Some);
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            Ok(xclip_image())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(None)
+        }
+    }
+
+    fn set_image(&mut self, png: &[u8]) -> Result<(), String> {
+        // Earlier experiment: piping PNG straight into xclip -t image/png. It
+        // returned before xclip actually claimed clipboard ownership, so the
+        // Ctrl+V fired against a stale/empty selection and images didn't paste.
+        // Reverted — arboard's synchronous set guarantees ownership before we
+        // send the paste key. Kept on arboard even though it decodes+re-encodes
+        // PNG; correctness beats the latency of the o(n) image encode.
+        let cb = self
+            .clipboard
+            .as_mut()
+            .ok_or_else(|| "clipboard unavailable (no X11)".to_string())?;
+        let (rgba, width, height) = decode_png(png)?;
+        let img = arboard::ImageData {
+            width,
+            height,
+            bytes: rgba.into(),
+        };
+        cb.set_image(img).map_err(|e| e.to_string())
+    }
+
+    fn get_image_name(&mut self) -> Result<Option<String>, String> {
+        let Some(cb) = self.clipboard.as_mut() else {
+            return Ok(None);
+        };
+        // file_list reads the clipboard's file payload (text/uri-list on X11,
+        // CF_HDROP on Windows, NSFilenamesPboardType on macOS). Prefer a file
+        // that looks like an image, otherwise fall back to the first entry.
+        match cb.get().file_list() {
+            Ok(files) => Ok(files
+                .iter()
+                .find(|f| super::is_image_file(f))
+                .or_else(|| files.first())
+                .and_then(|f| f.file_name())
+                .map(|n| n.to_string_lossy().into_owned())),
+            Err(_) => Ok(None),
+        }
     }
 
     fn send_paste(&self, target_window: Option<&str>) -> Result<(), String> {
@@ -192,4 +251,46 @@ fn send_synthetic_paste(target: Option<&str>) {
         "key --window {id} ctrl+v status={:?}",
         key.map(|s| s.success())
     ));
+}
+
+// --- image encode / decode ---------------------------------------------------
+// The backend stores images as PNG on disk and over IPC. arboard speaks RGBA
+// pixels, so bytes are converted at the clipboard boundary: encoded on the way
+// in (get_image), decoded on the way out (set_image). Wayland never touches
+// these — wl-paste/wl-copy carry PNG natively.
+
+fn encode_png(width: usize, height: usize, rgba: &[u8]) -> Result<Vec<u8>, String> {
+    let img = image::RgbaImage::from_raw(width as u32, height as u32, rgba.to_vec())
+        .ok_or_else(|| format!("invalid image dimensions {width}x{height}"))?;
+    let mut buf = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut buf, image::ImageFormat::Png)
+        .map_err(|e| format!("png encode failed: {e}"))?;
+    Ok(buf.into_inner())
+}
+
+fn decode_png(png: &[u8]) -> Result<(Vec<u8>, usize, usize), String> {
+    let img = image::load_from_memory(png).map_err(|e| format!("png decode failed: {e}"))?;
+    let rgba = img.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    Ok((rgba.into_raw(), width as usize, height as usize))
+}
+
+// xclip requests an arbitrary selection target, unlike arboard which is fixed
+// to image/png. Probe the common raster formats (a JPEG-only copy is the main
+// miss) and reuse the shared PNG normalizer on whichever one the owner offers.
+#[cfg(target_os = "linux")]
+fn xclip_image() -> Option<Vec<u8>> {
+    for mime in ["image/jpeg", "image/webp", "image/bmp", "image/gif", "image/tiff"] {
+        let out = std::process::Command::new("xclip")
+            .args(["-selection", "clipboard", "-t", mime, "-o"])
+            .output()
+            .ok()?;
+        if out.status.success() && !out.stdout.is_empty() {
+            if let Ok(png) = super::normalize_to_png(&out.stdout) {
+                return Some(png);
+            }
+        }
+    }
+    None
 }

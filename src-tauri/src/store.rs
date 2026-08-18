@@ -4,6 +4,19 @@ use std::fs;
 use std::path::PathBuf;
 
 #[derive(Clone, Serialize, Deserialize)]
+pub struct ImageEntry {
+    // Path relative to the app data directory, e.g. "images/<id>.png".
+    pub path: String,
+    pub width: u32,
+    pub height: u32,
+    // Where the image came from, e.g. the source file's basename when copied
+    // from a file manager ("screenshot.png"). Falls back to "Image" for raw
+    // pixel copies (screenshot tools, browser "copy image").
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ClipItem {
     pub id: String,
     pub text: String,
@@ -11,6 +24,10 @@ pub struct ClipItem {
     pub kind: String,
     pub time: u64,
     pub pinned: bool,
+    // `#[serde(default)]` keeps history.json files written by pre-image
+    // versions (v0.1.1 and earlier) readable without the field.
+    #[serde(default)]
+    pub image: Option<ImageEntry>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -61,26 +78,71 @@ impl Store {
         }
     }
 
-    pub fn add(&mut self, text: String, kind: String) {
-        let id = hash_id(&text);
-        let now = now_ms();
+    pub fn add_text(&mut self, text: &str, kind: &str) -> String {
+        let id = hash_bytes(text.as_bytes());
+        self.upsert(ClipItem {
+            id: id.clone(),
+            text: text.to_string(),
+            kind: kind.to_string(),
+            time: now_ms(),
+            pinned: false,
+            image: None,
+        });
+        id
+    }
 
-        if let Some(existing) = self.history.items.iter().find(|i| i.id == id) {
-            let mut bumped = existing.clone();
+    pub fn add_image(&mut self, id: &str, png: &[u8], width: u32, height: u32, name: String) {
+        let path = format!("images/{id}.png");
+        self.write_image(&path, png);
+        self.upsert(ClipItem {
+            id: id.to_string(),
+            text: String::new(),
+            kind: "image".to_string(),
+            time: now_ms(),
+            pinned: false,
+            image: Some(ImageEntry {
+                path,
+                width,
+                height,
+                name,
+            }),
+        });
+    }
+
+    // Persists an image next to history.json under <app_data>/images/<id>.png.
+    // Skips writing when the file already exists — re-copying or pasting a
+    // known image would otherwise rewrite a multi-MB PNG on every bump.
+    fn write_image(&self, rel: &str, png: &[u8]) {
+        let Some(dir) = self.path.parent() else {
+            return;
+        };
+        let full = dir.join(rel);
+        if full.exists() {
+            return;
+        }
+        if let Some(parent) = full.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(full, png);
+    }
+
+    // Loads the stored PNG bytes for an image item back off disk.
+    pub fn image_bytes(&self, id: &str) -> Option<Vec<u8>> {
+        let entry = self.get(id)?.image?;
+        fs::read(self.path.parent()?.join(&entry.path)).ok()
+    }
+
+    fn upsert(&mut self, item: ClipItem) {
+        let now = now_ms();
+        if let Some(existing) = self.history.items.iter().find(|i| i.id == item.id) {
+            // Re-copy bumps the item to the top and preserves its pin.
+            let mut bumped = item;
+            bumped.pinned = existing.pinned;
             bumped.time = now;
-            self.history.items.retain(|i| i.id != id);
+            self.history.items.retain(|i| i.id != bumped.id);
             self.history.items.insert(0, bumped);
         } else {
-            self.history.items.insert(
-                0,
-                ClipItem {
-                    id,
-                    text,
-                    kind,
-                    time: now,
-                    pinned: false,
-                },
-            );
+            self.history.items.insert(0, item);
         }
 
         self.trim();
@@ -118,11 +180,11 @@ impl Store {
     }
 }
 
-fn hash_id(text: &str) -> String {
+pub fn hash_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(text.as_bytes());
-    let bytes = hasher.finalize();
-    bytes.iter().take(8).map(|b| format!("{:02x}", b)).collect()
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    digest.iter().take(8).map(|b| format!("{:02x}", b)).collect()
 }
 
 fn now_ms() -> u64 {
