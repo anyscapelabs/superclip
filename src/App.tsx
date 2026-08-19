@@ -59,10 +59,12 @@ function App() {
 
   const paste = useCallback(
     (id: string) => {
-      invoke("paste_item", { id }).then(() => {
-        refresh();
-        setSelected(0);
-      });
+      invoke("paste_item", { id })
+        .then(() => {
+          refresh();
+          setSelected(0);
+        })
+        .catch((e) => console.error("paste_item:", e));
     },
     [refresh],
   );

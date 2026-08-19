@@ -83,7 +83,8 @@ async fn copy_item(id: String, app: tauri::AppHandle) -> Result<(), String> {
     // dedicated thread, keeping the main/UI thread free.
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let state = app.state::<Mutex<Store>>();
-        let clipboard = app.state::<Mutex<Box<dyn ClipboardBackend>>>();
+        #[cfg(target_os = "linux")]
+        crate::clipboard::paste_log(&format!("copy_item id={id} begin"));
         let item = {
             let store = state.lock().unwrap();
             store.get(&id).ok_or_else(|| "item not found".to_string())?
@@ -92,23 +93,40 @@ async fn copy_item(id: String, app: tauri::AppHandle) -> Result<(), String> {
         // new history. Bumping it via add_text/add_image would re-serialize the
         // entire history to disk for a no-op write, so don't touch the store at
         // all.
-        {
-            let mut cb = clipboard.lock().unwrap();
-            if item.image.is_some() {
-                let png = state
-                    .lock()
-                    .unwrap()
-                    .image_bytes(&id)
-                    .ok_or_else(|| "image file missing".to_string())?;
-                cb.set_image(&png)?;
-            } else {
-                cb.set_text(item.text.as_str())?;
-            }
+        //
+        // Text and image writes go through SEPARATE dedicated clipboard writers
+        // (text.rs / image.rs), each with its own managed Mutex. A hang or fix
+        // on one path can never block or regress the other.
+        if item.image.is_some() {
+            let png = state
+                .lock()
+                .unwrap()
+                .image_bytes(&id)
+                .ok_or_else(|| "image file missing".to_string())?;
+            #[cfg(target_os = "linux")]
+            crate::clipboard::paste_log(&format!("copy_item set_image png={}b", png.len()));
+            app.state::<Mutex<crate::clipboard::image::ImageClipboard>>()
+                .lock()
+                .unwrap()
+                .write(&png)?;
+        } else {
+            #[cfg(target_os = "linux")]
+            crate::clipboard::paste_log(&format!("copy_item set_text {}b", item.text.len()));
+            app.state::<Mutex<crate::clipboard::text::TextClipboard>>()
+                .lock()
+                .unwrap()
+                .write(item.text.as_str())?;
         }
+        #[cfg(target_os = "linux")]
+        crate::clipboard::paste_log("copy_item clipboard set ok");
         Ok(())
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| {
+        #[cfg(target_os = "linux")]
+        crate::clipboard::paste_log(&format!("copy_item join error: {e}"));
+        e.to_string()
+    })?
 }
 
 /// Returns an item's stored image as a base64-encoded PNG so the frontend can
@@ -153,9 +171,11 @@ async fn paste_item(id: String, app: tauri::AppHandle) -> Result<(), String> {
     // spawn_blocking moves the actual blocking work off the main thread.
     let id_for_task = id.clone();
     let app_for_task = app.clone();
-    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+    let blocked = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let state = app_for_task.state::<Mutex<Store>>();
-        let clipboard = app_for_task.state::<Mutex<Box<dyn ClipboardBackend>>>();
+
+        #[cfg(target_os = "linux")]
+        crate::clipboard::paste_log(&format!("paste_item id={id_for_task} lookup"));
 
         let item = {
             let store = state.lock().unwrap();
@@ -166,19 +186,40 @@ async fn paste_item(id: String, app: tauri::AppHandle) -> Result<(), String> {
 
         // The clipboard is set synchronously (and BEFORE the paste key fires)
         // so the target app is guaranteed to find the data when it lands.
-        {
-            let mut cb = clipboard.lock().unwrap();
-            if item.image.is_some() {
-                let png = state
-                    .lock()
-                    .unwrap()
-                    .image_bytes(&id_for_task)
-                    .ok_or_else(|| "image file missing".to_string())?;
-                cb.set_image(&png)?;
-            } else {
-                cb.set_text(item.text.as_str())?;
-            }
+        //
+        // Text and image writes go through SEPARATE dedicated clipboard writers
+        // (text.rs / image.rs), each with its own managed Mutex. A hang or fix
+        // on one path can never block or regress the other.
+        if item.image.is_some() {
+            let png = state
+                .lock()
+                .unwrap()
+                .image_bytes(&id_for_task)
+                .ok_or_else(|| "image file missing".to_string())?;
+            #[cfg(target_os = "linux")]
+            crate::clipboard::paste_log(&format!(
+                "paste_item set_image png={}b",
+                png.len()
+            ));
+            app_for_task
+                .state::<Mutex<crate::clipboard::image::ImageClipboard>>()
+                .lock()
+                .unwrap()
+                .write(&png)?;
+        } else {
+            #[cfg(target_os = "linux")]
+            crate::clipboard::paste_log(&format!(
+                "paste_item set_text {}b",
+                item.text.len()
+            ));
+            app_for_task
+                .state::<Mutex<crate::clipboard::text::TextClipboard>>()
+                .lock()
+                .unwrap()
+                .write(item.text.as_str())?;
         }
+        #[cfg(target_os = "linux")]
+        crate::clipboard::paste_log("paste_item clipboard set ok");
 
         // Re-pasting an existing item does not change its content, so bump it
         // in place instead of re-adding it: add_text/add_image re-serialize
@@ -188,11 +229,28 @@ async fn paste_item(id: String, app: tauri::AppHandle) -> Result<(), String> {
         // released so a slow disk write can't hold up the watcher.
         state.lock().unwrap().bump(&id_for_task);
         Ok(())
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+    });
+
+    match blocked.await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            #[cfg(target_os = "linux")]
+            crate::clipboard::paste_log(&format!("paste_item error: {e}"));
+            return Err(e);
+        }
+        Err(e) => {
+            #[cfg(target_os = "linux")]
+            crate::clipboard::paste_log(&format!("paste_item join error: {e}"));
+            return Err(e.to_string());
+        }
+    }
 
     let prev_window = app.state::<Mutex<Option<String>>>().lock().unwrap().clone();
+
+    #[cfg(target_os = "linux")]
+    crate::clipboard::paste_log(&format!(
+        "paste_item scheduling key prev_window={prev_window:?}"
+    ));
 
     // Exactly one activation happens per paste, inside the async paste flow
     // (send_synthetic_paste). Doing it here too would race the picker hide.
@@ -242,7 +300,11 @@ pub fn run() {
             let store = Store::new(app.path().app_data_dir()?.join("history.json"));
             app.manage(Mutex::new(store));
             app.manage(Mutex::new(None::<String>));
+            // Shared backend for the paste-key injection (send_paste). The
+            // text/image WRITE paths use dedicated writers below.
             app.manage(Mutex::new(detect_backend()));
+            app.manage(Mutex::new(crate::clipboard::text::TextClipboard::new()));
+            app.manage(Mutex::new(crate::clipboard::image::ImageClipboard::new()));
             watcher::start(app.handle().clone());
 
             // Start quietly with the OS on login (enabled once unless the user

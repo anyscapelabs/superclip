@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::clipboard::{is_image_file, normalize_to_png, percent_decode, ClipboardBackend};
+use crate::clipboard::{is_image_file, normalize_to_png, percent_decode};
 use crate::detect::detect_kind;
 use crate::store::{hash_bytes, Store};
 
@@ -80,19 +80,24 @@ fn capture_path_as_image(
 
 pub fn start(app: AppHandle) {
     std::thread::spawn(move || {
+        // The watcher owns its OWN backend instance. The paste/copy commands
+        // share a separate instance behind a Mutex; do not couple the two.
+        // arboard's X11 reads can block indefinitely against a non-responsive
+        // selection owner (Chromium/Electron owners are notorious for ignoring
+        // requests). If the watcher shared the paste backend's lock, one wedged
+        // read held that mutex forever and every paste hung behind the lock.
+        // Isolating the watcher bounds the damage: a wedged watcher read stalls
+        // history capture only — paste/copy keep working.
+        let mut backend = crate::clipboard::detect_backend();
         let mut last_text: Option<String> = None;
         let mut last_image_hash: Option<String> = None;
 
         loop {
-            let backend = app.state::<Mutex<Box<dyn ClipboardBackend>>>();
-
             // --- text -------------------------------------------------------
             // Raw read WITHOUT dedupe filtering: we need to know whether the
             // clipboard holds any text at all (to gate the image probe) even
             // when the text is unchanged from the last cycle.
             let text = backend
-                .lock()
-                .unwrap()
                 .get_text()
                 .ok()
                 .map(|t| t.trim().to_string())
@@ -114,8 +119,7 @@ pub fn start(app: AppHandle) {
                     // trigger an extra clipboard read.
                     let looks_like_path = text.starts_with('/') || text.contains("file://");
                     let has_file_payload = if looks_like_path {
-                        let mut b = backend.lock().unwrap();
-                        b.get_image_name().ok().flatten().is_some()
+                        backend.get_image_name().ok().flatten().is_some()
                     } else {
                         false
                     };
@@ -162,10 +166,9 @@ pub fn start(app: AppHandle) {
                     // clipboard. Probe for one.
                     last_text = None;
                     let (image, source_name) = {
-                        let mut b = backend.lock().unwrap();
-                        let img = b.get_image().ok().flatten();
+                        let img = backend.get_image().ok().flatten();
                         let name = if img.is_some() {
-                            b.get_image_name().ok().flatten()
+                            backend.get_image_name().ok().flatten()
                         } else {
                             None
                         };

@@ -1,3 +1,5 @@
+pub mod image;
+pub mod text;
 pub mod wayland;
 pub mod x11;
 
@@ -75,11 +77,11 @@ pub fn normalize_to_png(bytes: &[u8]) -> Result<Vec<u8>, String> {
     if bytes.starts_with(PNG_MAGIC) {
         return Ok(bytes.to_vec());
     }
-    let img = image::load_from_memory(bytes).map_err(|e| format!("image decode failed: {e}"))?;
+    let img = ::image::load_from_memory(bytes).map_err(|e| format!("image decode failed: {e}"))?;
     let rgba = img.to_rgba8();
     let mut buf = Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgba8(rgba)
-        .write_to(&mut buf, image::ImageFormat::Png)
+    ::image::DynamicImage::ImageRgba8(rgba)
+        .write_to(&mut buf, ::image::ImageFormat::Png)
         .map_err(|e| format!("png encode failed: {e}"))?;
     Ok(buf.into_inner())
 }
