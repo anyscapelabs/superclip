@@ -62,12 +62,21 @@ impl ClipboardBackend for X11Backend {
     }
 
     fn set_image(&mut self, png: &[u8]) -> Result<(), String> {
-        // Earlier experiment: piping PNG straight into xclip -t image/png. It
-        // returned before xclip actually claimed clipboard ownership, so the
-        // Ctrl+V fired against a stale/empty selection and images didn't paste.
-        // Reverted — arboard's synchronous set guarantees ownership before we
-        // send the paste key. Kept on arboard even though it decodes+re-encodes
-        // PNG; correctness beats the latency of the o(n) image encode.
+        // Fast path: hand xclip the raw PNG bytes so the receiving app gets
+        // them verbatim — no decode + re-encode (~300ms on big screenshots).
+        // xclip reads the temp file, claims clipboard ownership, then keeps
+        // running detached serving image/png until a new selection takes over.
+        // We poll TARGETS so this only returns once ownership is guaranteed
+        // (measured ~100ms, comfortably under INITIAL_PASTE_DELAY), so the
+        // Ctrl+V that follows never hits a stale/empty selection.
+        #[cfg(target_os = "linux")]
+        {
+            if set_image_xclip(png) {
+                return Ok(());
+            }
+            // xclip missing or failed to claim ownership — fall through to
+            // arboard so image paste never silently breaks.
+        }
         let cb = self
             .clipboard
             .as_mut()
@@ -277,11 +286,16 @@ fn decode_png(png: &[u8]) -> Result<(Vec<u8>, usize, usize), String> {
 }
 
 // xclip requests an arbitrary selection target, unlike arboard which is fixed
-// to image/png. Probe the common raster formats (a JPEG-only copy is the main
-// miss) and reuse the shared PNG normalizer on whichever one the owner offers.
+// to image/png. Instead of blindly downloading every raster format (up to five
+// subprocesses per poll cycle), first ask the owner for its advertised target
+// list — one fast call — and only fetch pixels for a target we actually see.
 #[cfg(target_os = "linux")]
 fn xclip_image() -> Option<Vec<u8>> {
+    let targets = clipboard_targets()?;
     for mime in ["image/jpeg", "image/webp", "image/bmp", "image/gif", "image/tiff"] {
+        if !targets.lines().any(|t| t.trim() == mime) {
+            continue;
+        }
         let out = std::process::Command::new("xclip")
             .args(["-selection", "clipboard", "-t", mime, "-o"])
             .output()
@@ -293,4 +307,78 @@ fn xclip_image() -> Option<Vec<u8>> {
         }
     }
     None
+}
+
+// The clipboard owner's advertised target list ("TARGETS\nimage/png\n…"), one
+// quick xclip call. Shared by get_image (which raster formats are available?)
+// and set_image (did our spawned xclip claim ownership yet?).
+#[cfg(target_os = "linux")]
+fn clipboard_targets() -> Option<String> {
+    let out = std::process::Command::new("xclip")
+        .args(["-selection", "clipboard", "-t", "TARGETS", "-o"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+// Writes the PNG to a temp file and hands it to a detached xclip serving
+// image/png. Returns true only after the selection advertises image/png, so
+// callers know ownership is real before they fire the paste key. The temp file
+// is removed on both success (xclip buffers the image at startup, so the file
+// is no longer needed) and failure.
+#[cfg(target_os = "linux")]
+fn set_image_xclip(png: &[u8]) -> bool {
+    let tmp = std::env::temp_dir().join(format!(
+        "superclip-paste-{}.png",
+        std::process::id()
+    ));
+    if std::fs::write(&tmp, png).is_err() {
+        return false;
+    }
+    let stdin_file = match std::fs::File::open(&tmp) {
+        Ok(f) => f,
+        Err(_) => {
+            let _ = std::fs::remove_file(&tmp);
+            return false;
+        }
+    };
+    let spawned = std::process::Command::new("xclip")
+        .args(["-selection", "clipboard", "-t", "image/png", "-i"])
+        .stdin(std::process::Stdio::from(stdin_file))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    let mut child = match spawned {
+        Ok(c) => c,
+        Err(_) => {
+            let _ = std::fs::remove_file(&tmp);
+            return false;
+        }
+    };
+
+    // xclip reads the whole temp file at startup, but only after it has been
+    // given a chance to open the fd we passed. Delete the file only once
+    // ownership is confirmed — by that point the image is buffered in xclip.
+    let deadline = std::time::Instant::now() + Duration::from_millis(500);
+    loop {
+        if clipboard_targets()
+            .map(|t| t.lines().any(|l| l.trim() == "image/png"))
+            .unwrap_or(false)
+        {
+            let _ = std::fs::remove_file(&tmp);
+            return true;
+        }
+        if std::time::Instant::now() > deadline {
+            // Give up and reap the child so we don't leak a detached xclip
+            // that can never serve a paste.
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(&tmp);
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }

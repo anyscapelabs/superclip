@@ -27,6 +27,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A stale or second instance holding the `Ctrl+Shift+V` hotkey no longer makes
   the app panic at startup — the global shortcut registration now degrades
   gracefully and the app keeps running in the tray instead of crashing.
+- Pasting felt sluggish (multi-second stalls in the worst case) because the
+  500 ms clipboard watcher called `get_image()` on every cycle and the X11
+  backend fell through to probing five raster formats via subprocess while
+  holding the same clipboard mutex the paste path needs. The watcher now only
+  probe images when the clipboard holds no text (pure image copies), and the
+  X11 fallback asks the owner for its advertised targets once instead of
+  downloading every format blind.
+- Image paste no longer round-trips through a PNG decode + re-encode (~300 ms
+  on large screenshots). The X11 backend now hands the stored PNG straight to
+  a detached `xclip` serving the `image/png` target, verifying ownership was
+  claimed before returning; `arboard` remains as a fallback if `xclip` is
+  missing.
 
 ## [0.1.1] - 2026-08-08
 

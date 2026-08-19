@@ -87,42 +87,52 @@ pub fn start(app: AppHandle) {
             let backend = app.state::<Mutex<Box<dyn ClipboardBackend>>>();
 
             // --- text -------------------------------------------------------
+            // Raw read WITHOUT dedupe filtering: we need to know whether the
+            // clipboard holds any text at all (to gate the image probe) even
+            // when the text is unchanged from the last cycle.
             let text = backend
                 .lock()
                 .unwrap()
                 .get_text()
                 .ok()
                 .map(|t| t.trim().to_string())
-                .filter(|t| !t.is_empty())
-                .filter(|t| last_text.as_deref() != Some(t.as_str()));
+                .filter(|t| !t.is_empty());
+
+            let text_present = text.is_some();
 
             let mut handled_as_image = false;
             if let Some(text) = text {
-                // A file-manager copy of an image shows up in the text target as
-                // a path. Store the real image from disk instead of the path.
-                // Only probe the clipboard's file payload when the text looks
-                // path-like, so ordinary text copies never trigger an extra
-                // clipboard read.
-                let looks_like_path = text.starts_with('/') || text.contains("file://");
-                let has_file_payload = if looks_like_path {
-                    let mut b = backend.lock().unwrap();
-                    b.get_image_name().ok().flatten().is_some()
+                if last_text.as_deref() == Some(text.as_str()) {
+                    // Same text as last cycle — nothing new to record. Keep the
+                    // last_text marker so the value only re-emits "clipboard-
+                    // updated" when it actually changes.
                 } else {
-                    false
-                };
-                if let Some(path) = image_path_from_text(&text, has_file_payload) {
-                    handled_as_image =
-                        capture_path_as_image(&app, &path, &mut last_image_hash);
-                }
-                if !handled_as_image {
-                    let kind = detect_kind(&text).to_string();
-                    {
-                        let state = app.state::<Mutex<Store>>();
-                        state.lock().unwrap().add_text(&text, &kind);
+                    // A file-manager copy of an image shows up in the text
+                    // target as a path. Store the real image from disk instead
+                    // of the path. Only probe the clipboard's file payload when
+                    // the text looks path-like, so ordinary text copies never
+                    // trigger an extra clipboard read.
+                    let looks_like_path = text.starts_with('/') || text.contains("file://");
+                    let has_file_payload = if looks_like_path {
+                        let mut b = backend.lock().unwrap();
+                        b.get_image_name().ok().flatten().is_some()
+                    } else {
+                        false
+                    };
+                    if let Some(path) = image_path_from_text(&text, has_file_payload) {
+                        handled_as_image =
+                            capture_path_as_image(&app, &path, &mut last_image_hash);
                     }
-                    let _ = app.emit("clipboard-updated", ());
+                    if !handled_as_image {
+                        let kind = detect_kind(&text).to_string();
+                        {
+                            let state = app.state::<Mutex<Store>>();
+                            state.lock().unwrap().add_text(&text, &kind);
+                        }
+                        let _ = app.emit("clipboard-updated", ());
+                    }
+                    last_text = Some(text);
                 }
-                last_text = Some(text);
             }
 
             // --- image ------------------------------------------------------
@@ -130,38 +140,59 @@ pub fn start(app: AppHandle) {
             // the last-seen text and vice versa, so the two must not clobber
             // each other's dedupe state. Skipped on cycles where the text was
             // already resolved as an image from disk, avoiding a duplicate.
+            //
+            // Gated on the text target being ABSENT: when the clipboard carries
+            // text (a plain copy, an unchanged one, or a handled image path),
+            // there is almost never an image underneath, and blind-probing one
+            // makes the X11 backend fall through to xclip — spawning up to five
+            // subprocesses per cycle while holding the same Mutex the paste
+            // path needs. Text-only clipboards therefore never touch image
+            // probing at all.
             if !handled_as_image {
-                let (image, source_name) = {
-                    let mut b = backend.lock().unwrap();
-                    let img = b.get_image().ok().flatten();
-                    let name = if img.is_some() {
-                        b.get_image_name().ok().flatten()
-                    } else {
-                        None
+                if text_present {
+                    // Text is on the clipboard and wasn't resolved to an image.
+                    // A new text copy supersedes any previous image: reset the
+                    // tracker so that re-copying that same image later registers
+                    // as a fresh capture (and bumps it) instead of being skipped
+                    // as "unchanged". Nothing to probe this cycle.
+                    last_image_hash = None;
+                } else {
+                    // Clipboard holds no text — a pure image copy (screenshot
+                    // tool, browser/editor "copy image") or an emptied
+                    // clipboard. Probe for one.
+                    last_text = None;
+                    let (image, source_name) = {
+                        let mut b = backend.lock().unwrap();
+                        let img = b.get_image().ok().flatten();
+                        let name = if img.is_some() {
+                            b.get_image_name().ok().flatten()
+                        } else {
+                            None
+                        };
+                        (img, name)
                     };
-                    (img, name)
-                };
-                match image {
-                    Some(png) => {
-                        let hash = hash_bytes(&png);
-                        if last_image_hash.as_deref() != Some(hash.as_str()) {
-                            if let Some((w, h)) = png_dims(&png) {
-                                let name = source_name.unwrap_or_else(|| "Image".to_string());
-                                {
-                                    let state = app.state::<Mutex<Store>>();
-                                    state.lock().unwrap().add_image(&hash, &png, w, h, name);
+                    match image {
+                        Some(png) => {
+                            let hash = hash_bytes(&png);
+                            if last_image_hash.as_deref() != Some(hash.as_str()) {
+                                if let Some((w, h)) = png_dims(&png) {
+                                    let name = source_name.unwrap_or_else(|| "Image".to_string());
+                                    {
+                                        let state = app.state::<Mutex<Store>>();
+                                        state.lock().unwrap().add_image(&hash, &png, w, h, name);
+                                    }
+                                    let _ = app.emit("clipboard-updated", ());
+                                    last_image_hash = Some(hash);
                                 }
-                                let _ = app.emit("clipboard-updated", ());
-                                last_image_hash = Some(hash);
                             }
                         }
-                    }
-                    None => {
-                        // Clipboard holds no image now (e.g. text was copied
-                        // after a screenshot). Reset so that copying that same
-                        // image again later registers as a fresh capture (and
-                        // bumps it) instead of being skipped as "unchanged".
-                        last_image_hash = None;
+                        None => {
+                            // Clipboard holds no image now (e.g. the clipboard
+                            // was emptied). Reset so that copying that same image
+                            // again later registers as a fresh capture (and
+                            // bumps it) instead of being skipped as "unchanged".
+                            last_image_hash = None;
+                        }
                     }
                 }
             }
