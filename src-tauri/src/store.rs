@@ -1,17 +1,14 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ImageEntry {
-    // Path relative to the app data directory, e.g. "images/<id>.png".
     pub path: String,
     pub width: u32,
     pub height: u32,
-    // Where the image came from, e.g. the source file's basename when copied
-    // from a file manager ("screenshot.png"). Falls back to "Image" for raw
-    // pixel copies (screenshot tools, browser "copy image").
     #[serde(default)]
     pub name: String,
 }
@@ -24,8 +21,6 @@ pub struct ClipItem {
     pub kind: String,
     pub time: u64,
     pub pinned: bool,
-    // `#[serde(default)]` keeps history.json files written by pre-image
-    // versions (v0.1.1 and earlier) readable without the field.
     #[serde(default)]
     pub image: Option<ImageEntry>,
 }
@@ -60,7 +55,7 @@ impl Store {
         Self { path, history }
     }
 
-    fn read(path: &PathBuf) -> History {
+    fn read(path: &Path) -> History {
         if let Ok(data) = fs::read_to_string(path) {
             if let Ok(h) = serde_json::from_str(&data) {
                 return h;
@@ -69,13 +64,38 @@ impl Store {
         History::default()
     }
 
-    pub fn save(&self) {
-        if let Some(dir) = self.path.parent() {
-            let _ = fs::create_dir_all(dir);
+    // Persist before replacing the current history file.
+    fn save(&self) -> bool {
+        let Some(dir) = self.path.parent() else {
+            return false;
+        };
+        if fs::create_dir_all(dir).is_err() {
+            return false;
         }
-        if let Ok(data) = serde_json::to_string_pretty(&self.history) {
-            let _ = fs::write(&self.path, data);
+        let Ok(data) = serde_json::to_string_pretty(&self.history) else {
+            return false;
+        };
+
+        let tmp = self.path.with_extension("json.tmp");
+        let result = (|| -> std::io::Result<()> {
+            let mut file = fs::File::create(&tmp)?;
+            file.write_all(data.as_bytes())?;
+            file.sync_all()?;
+            replace_file(&tmp, &self.path)?;
+
+            #[cfg(unix)]
+            {
+                let _ = fs::File::open(dir).and_then(|file| file.sync_all());
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = result {
+            let _ = fs::remove_file(&tmp);
+            eprintln!("superclip: could not save clipboard history: {error}");
+            return false;
         }
+        true
     }
 
     pub fn add_text(&mut self, text: &str, kind: &str) -> String {
@@ -109,9 +129,6 @@ impl Store {
         });
     }
 
-    // Persists an image next to history.json under <app_data>/images/<id>.png.
-    // Skips writing when the file already exists — re-copying or pasting a
-    // known image would otherwise rewrite a multi-MB PNG on every bump.
     fn write_image(&self, rel: &str, png: &[u8]) {
         let Some(dir) = self.path.parent() else {
             return;
@@ -126,7 +143,6 @@ impl Store {
         let _ = fs::write(full, png);
     }
 
-    // Loads the stored PNG bytes for an image item back off disk.
     pub fn image_bytes(&self, id: &str) -> Option<Vec<u8>> {
         let entry = self.get(id)?.image?;
         fs::read(self.path.parent()?.join(&entry.path)).ok()
@@ -135,7 +151,6 @@ impl Store {
     fn upsert(&mut self, item: ClipItem) {
         let now = now_ms();
         if let Some(existing) = self.history.items.iter().find(|i| i.id == item.id) {
-            // Re-copy bumps the item to the top and preserves its pin.
             let mut bumped = item;
             bumped.pinned = existing.pinned;
             bumped.time = now;
@@ -146,15 +161,11 @@ impl Store {
         }
 
         self.trim();
-        self.save();
+        if self.save() {
+            self.cleanup_orphaned_images();
+        }
     }
 
-    // Moves an existing item to the top of the list without rewriting its
-    // content — its bytes are unchanged, so this is used when an item is
-    // pasted/copied again. Reordering a re-paste through add_text/add_image
-    // would re-serialize the ENTIRE history (every item's inline text body)
-    // on every single paste; this skips the disk write entirely when the item
-    // is already at the top.
     pub fn bump(&mut self, id: &str) {
         if self.history.items.first().is_some_and(|i| i.id == id) {
             return;
@@ -190,12 +201,67 @@ impl Store {
 
     pub fn clear_unpinned(&mut self) {
         self.history.items.retain(|i| i.pinned);
-        self.save();
+        if self.save() {
+            self.cleanup_orphaned_images();
+        }
     }
 
     pub fn get(&self, id: &str) -> Option<ClipItem> {
         self.history.items.iter().find(|i| i.id == id).cloned()
     }
+
+    fn cleanup_orphaned_images(&self) {
+        let Some(root) = self.path.parent() else {
+            return;
+        };
+        let images = root.join("images");
+        let Ok(entries) = fs::read_dir(&images) else {
+            return;
+        };
+        let referenced: std::collections::HashSet<&str> = self
+            .history
+            .items
+            .iter()
+            .filter_map(|item| item.image.as_ref().map(|image| image.path.as_str()))
+            .collect();
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let relative = format!("images/{name}");
+            if !referenced.contains(relative.as_str()) {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_file(tmp: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(tmp, destination)
+}
+
+#[cfg(windows)]
+fn replace_file(tmp: &Path, destination: &Path) -> std::io::Result<()> {
+    let backup = destination.with_extension("json.bak");
+    let _ = fs::remove_file(&backup);
+    let had_destination = destination.exists();
+    if had_destination {
+        fs::rename(destination, &backup)?;
+    }
+    if let Err(error) = fs::rename(tmp, destination) {
+        if had_destination {
+            let _ = fs::rename(&backup, destination);
+        }
+        return Err(error);
+    }
+    let _ = fs::remove_file(backup);
+    Ok(())
 }
 
 pub fn hash_bytes(bytes: &[u8]) -> String {
@@ -210,4 +276,43 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_path(name: &str) -> PathBuf {
+        let unique = format!("superclip-store-test-{name}-{}", now_ms());
+        std::env::temp_dir().join(unique).join("history.json")
+    }
+
+    #[test]
+    fn save_writes_valid_json_without_a_partial_file() {
+        let path = test_path("atomic");
+        let mut store = Store::new(path.clone());
+        store.add_text("durable clipboard entry", "text");
+
+        let saved = fs::read_to_string(&path).unwrap();
+        let history: History = serde_json::from_str(&saved).unwrap();
+        assert_eq!(history.items.len(), 1);
+        assert!(!path.with_extension("json.tmp").exists());
+
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn clearing_history_releases_image_payloads() {
+        let path = test_path("cleanup");
+        let mut store = Store::new(path.clone());
+        let id = "test-image";
+        store.add_image(id, b"not-a-real-png", 1, 1, "Image".into());
+        let image_path = path.parent().unwrap().join(format!("images/{id}.png"));
+        assert!(image_path.exists());
+
+        store.clear_unpinned();
+        assert!(!image_path.exists());
+
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
 }

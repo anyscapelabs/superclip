@@ -25,7 +25,8 @@ bun run tauri build   # produce a release binary
 ## Where things live
 
 - `src/` — React + Tailwind frontend
-- `src-tauri/src/lib.rs` — Tauri setup, tray, hotkey, commands, paste
+- `src-tauri/src/lib.rs` — Tauri setup, tray, hotkey, window lifecycle
+- `src-tauri/src/commands.rs` — Tauri commands and paste flow
 - `src-tauri/src/store.rs` — history store
 - `src-tauri/src/watcher.rs` — clipboard watcher
 - `docs/` — usage, architecture, this guide
@@ -42,9 +43,9 @@ bun run tauri build   # produce a release binary
 Before opening a PR, make sure the release jobs would pass:
 
 ```bash
-bun run build                          # frontend (tsc + vite)
-cargo fmt --all -- --check             # formatting
-cargo clippy --all-targets -- -D warnings
+bun run build                                                    # frontend (tsc + vite)
+cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check  # formatting
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 ```
 
 ## Paste plumbing
@@ -53,7 +54,7 @@ If you touch the paste path (`send_synthetic_paste`, `activate_window`,
 `send_paste_key`), keep the invariants from `lib.rs`:
 
 - exactly one window activation per paste (plus one verified retry)
-- use `xdotool key --window <id> ctrl+v` on Linux
+- use XTEST `xdotool key ctrl+v` on X11 (not `--window`, which uses XSendEvent)
 - named constants with comments, no new `.unwrap()` in the paste path
 - log every external call via `paste_log()` and verify state afterwards
 
