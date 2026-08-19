@@ -69,32 +69,46 @@ fn get_history(state: State<Mutex<Store>>) -> Vec<ClipItem> {
 }
 
 #[tauri::command]
-fn copy_item(
-    id: String,
-    state: State<Mutex<Store>>,
-    clipboard: State<Mutex<Box<dyn ClipboardBackend>>>,
-) -> Result<(), String> {
-    let item = {
-        let store = state.lock().unwrap();
-        store.get(&id).ok_or_else(|| "item not found".to_string())?
-    };
-    // Copying an item just re-emits it to the clipboard — it doesn't create new
-    // history. Bumping it via add_text/add_image would re-serialize the entire
-    // history to disk for a no-op write, so don't touch the store at all.
-    {
-        let mut cb = clipboard.lock().unwrap();
-        if item.image.is_some() {
-            let png = state
-                .lock()
-                .unwrap()
-                .image_bytes(&id)
-                .ok_or_else(|| "image file missing".to_string())?;
-            cb.set_image(&png)?;
-        } else {
-            cb.set_text(item.text.as_str())?;
+async fn copy_item(id: String, app: tauri::AppHandle) -> Result<(), String> {
+    // NOTE: this is `async fn` on purpose. A plain (non-async) #[tauri::command]
+    // is invoked INLINE on whatever thread delivered the IPC message, which on
+    // Linux/WebKitGTK is the main GLib event loop thread — the same thread that
+    // pumps the webview and WebKit's own internal timers. set_image's xclip
+    // ownership poll (up to ~500ms of subprocess spawns) used to run right on
+    // that thread and froze the whole app, not just the window: WebKit's
+    // internal load timer firing very late is the direct symptom
+    // ("WebLoaderStrategy::internallyFailedLoadTimerFired"). Marking the
+    // command async makes Tauri dispatch it onto the async runtime instead of
+    // inline, and spawn_blocking below moves the actual blocking work onto a
+    // dedicated thread, keeping the main/UI thread free.
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let state = app.state::<Mutex<Store>>();
+        let clipboard = app.state::<Mutex<Box<dyn ClipboardBackend>>>();
+        let item = {
+            let store = state.lock().unwrap();
+            store.get(&id).ok_or_else(|| "item not found".to_string())?
+        };
+        // Copying an item just re-emits it to the clipboard — it doesn't create
+        // new history. Bumping it via add_text/add_image would re-serialize the
+        // entire history to disk for a no-op write, so don't touch the store at
+        // all.
+        {
+            let mut cb = clipboard.lock().unwrap();
+            if item.image.is_some() {
+                let png = state
+                    .lock()
+                    .unwrap()
+                    .image_bytes(&id)
+                    .ok_or_else(|| "image file missing".to_string())?;
+                cb.set_image(&png)?;
+            } else {
+                cb.set_text(item.text.as_str())?;
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Returns an item's stored image as a base64-encoded PNG so the frontend can
@@ -118,48 +132,65 @@ fn send_paste_key(prev_window: Option<String>, app: tauri::AppHandle) {
 }
 
 #[tauri::command]
-fn paste_item(
-    id: String,
-    app: tauri::AppHandle,
-    state: State<Mutex<Store>>,
-    clipboard: State<Mutex<Box<dyn ClipboardBackend>>>,
-) -> Result<(), String> {
-    let item = {
-        let store = state.lock().unwrap();
-        store.get(&id).ok_or_else(|| "item not found".to_string())?
-    };
+async fn paste_item(id: String, app: tauri::AppHandle) -> Result<(), String> {
     // Hide the palette FIRST so the click always closes the window instantly.
-    // The clipboard write below can take up to ~500ms for images (xclip
-    // ownership poll); leaving the window visible while that happens is what
-    // made paste "freeze". Hiding before writing is safe: send_paste_key waits
-    // INITIAL_PASTE_DELAY before injecting Ctrl+V, which gives the write time
-    // to land either way.
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.hide();
     }
-    // The clipboard is set synchronously (and BEFORE the paste key fires) so
-    // the target app is guaranteed to find the data when it lands.
-    // Background-threading this made image and text paste flaky.
-    {
-        let mut cb = clipboard.lock().unwrap();
-        if item.image.is_some() {
-            let png = state
-                .lock()
-                .unwrap()
-                .image_bytes(&id)
-                .ok_or_else(|| "image file missing".to_string())?;
-            cb.set_image(&png)?;
-        } else {
-            cb.set_text(item.text.as_str())?;
+
+    // NOTE: `async fn` + spawn_blocking is required here, not just a nicety.
+    // A plain (non-async) #[tauri::command] runs INLINE on whatever thread
+    // delivered the IPC message — on Linux/WebKitGTK that's the main GLib
+    // event loop thread, i.e. the same thread that pumps the webview and
+    // WebKit's own internal timers. set_image's xclip-ownership poll can hold
+    // the clipboard mutex and spawn subprocesses for up to ~500ms; when this
+    // command was a plain `fn`, that poll ran inline on the main thread and
+    // froze the *whole app* (not just the window), and WebKit's internal load
+    // timer firing very late is exactly what surfaces as
+    // "WebLoaderStrategy::internallyFailedLoadTimerFired". Text never showed
+    // it because set_text is sub-millisecond. Marking the command async makes
+    // Tauri dispatch it via the async runtime instead of inline, and
+    // spawn_blocking moves the actual blocking work off the main thread.
+    let id_for_task = id.clone();
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let state = app_for_task.state::<Mutex<Store>>();
+        let clipboard = app_for_task.state::<Mutex<Box<dyn ClipboardBackend>>>();
+
+        let item = {
+            let store = state.lock().unwrap();
+            store
+                .get(&id_for_task)
+                .ok_or_else(|| "item not found".to_string())?
+        };
+
+        // The clipboard is set synchronously (and BEFORE the paste key fires)
+        // so the target app is guaranteed to find the data when it lands.
+        {
+            let mut cb = clipboard.lock().unwrap();
+            if item.image.is_some() {
+                let png = state
+                    .lock()
+                    .unwrap()
+                    .image_bytes(&id_for_task)
+                    .ok_or_else(|| "image file missing".to_string())?;
+                cb.set_image(&png)?;
+            } else {
+                cb.set_text(item.text.as_str())?;
+            }
         }
-    }
-    // Re-pasting an existing item does not change its content, so bump it in
-    // place instead of re-adding it: add_text/add_image re-serialize the whole
-    // history (every item's inline text) to disk on every paste, which is
-    // wasted work that also holds the store lock. bump() skips the write
-    // entirely when the item is already at the top. Runs AFTER the clipboard
-    // lock is released so a slow disk write can't hold up the watcher.
-    state.lock().unwrap().bump(&id);
+
+        // Re-pasting an existing item does not change its content, so bump it
+        // in place instead of re-adding it: add_text/add_image re-serialize
+        // the whole history to disk on every paste, which is wasted work that
+        // also holds the store lock. bump() skips the write entirely when the
+        // item is already at the top. Runs AFTER the clipboard lock is
+        // released so a slow disk write can't hold up the watcher.
+        state.lock().unwrap().bump(&id_for_task);
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
 
     let prev_window = app.state::<Mutex<Option<String>>>().lock().unwrap().clone();
 
