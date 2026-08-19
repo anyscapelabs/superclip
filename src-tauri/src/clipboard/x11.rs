@@ -250,14 +250,18 @@ fn send_synthetic_paste(target: Option<&str>) {
         }
     }
 
-    // Send Ctrl+V directly to the target window (XSendEvent, so it does not
-    // depend on a keyboard grab / XTEST). Focus was verified above, so this is
-    // belt-and-suspenders on top of a focused-window send.
+    // Send Ctrl+V with xdotool's XTEST path. `xdotool key --window` uses
+    // XSendEvent (synthetic events) which Chromium, Electron, and most GTK
+    // apps silently discard as untrusted — xdotool reports success but nothing
+    // is pasted. Without `--window`, xdotool uses the XTEST extension
+    // (XTestFakeKeyEvent), which is indistinguishable from a real hardware key
+    // press and every app honors. Focus was already verified to be on the
+    // target window above, so an XTEST key lands where the user is.
     let key = std::process::Command::new("xdotool")
-        .args(["key", "--window", id, "ctrl+v"])
+        .args(["key", "ctrl+v"])
         .status();
     paste_log(&format!(
-        "key --window {id} ctrl+v status={:?}",
+        "key ctrl+v status={:?}",
         key.map(|s| s.success())
     ));
 }
@@ -368,8 +372,27 @@ fn set_image_xclip(png: &[u8]) -> bool {
             .map(|t| t.lines().any(|l| l.trim() == "image/png"))
             .unwrap_or(false)
         {
-            let _ = std::fs::remove_file(&tmp);
-            return true;
+            // A single TARGETS hit can catch xclip the very instant it claims
+            // selection ownership (XSetSelectionOwner) but before its
+            // SelectionRequest-serving loop is fully running; a requesting app
+            // could then get an empty/stale response. Requiring two consecutive
+            // confirms a few ms apart bridges that fork window.
+            std::thread::sleep(Duration::from_millis(20));
+            if clipboard_targets()
+                .map(|t| t.lines().any(|l| l.trim() == "image/png"))
+                .unwrap_or(false)
+            {
+                let _ = std::fs::remove_file(&tmp);
+                // Success: xclip keeps serving the selection until another app
+                // takes the clipboard, then exits. Reap it from a background
+                // thread so it never lingers as a zombie once its ownership is
+                // superseded.
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                return true;
+            }
+            // First confirm only — loop again for a fresh pair.
         }
         if std::time::Instant::now() > deadline {
             // Give up and reap the child so we don't leak a detached xclip

@@ -133,8 +133,17 @@ fn paste_item(
         let store = state.lock().unwrap();
         store.get(&id).ok_or_else(|| "item not found".to_string())?
     };
-    // The clipboard is set synchronously (and BEFORE the window hides) so the
-    // target app is guaranteed to find the data when the paste key lands.
+    // Hide the palette FIRST so the click always closes the window instantly.
+    // The clipboard write below can take up to ~500ms for images (xclip
+    // ownership poll); leaving the window visible while that happens is what
+    // made paste "freeze". Hiding before writing is safe: send_paste_key waits
+    // INITIAL_PASTE_DELAY before injecting Ctrl+V, which gives the write time
+    // to land either way.
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.hide();
+    }
+    // The clipboard is set synchronously (and BEFORE the paste key fires) so
+    // the target app is guaranteed to find the data when it lands.
     // Background-threading this made image and text paste flaky.
     {
         let mut cb = clipboard.lock().unwrap();
@@ -162,9 +171,6 @@ fn paste_item(
 
     // Exactly one activation happens per paste, inside the async paste flow
     // (send_synthetic_paste). Doing it here too would race the picker hide.
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.hide();
-    }
     send_paste_key(prev_window, app.clone());
     Ok(())
 }

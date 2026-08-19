@@ -39,6 +39,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a detached `xclip` serving the `image/png` target, verifying ownership was
   claimed before returning; `arboard` remains as a fallback if `xclip` is
   missing.
+- Fixed paste landing at all in Chromium, Electron, and most GTK apps: the
+  synthetic Ctrl+V was sent via `xdotool key --window`, which uses XSendEvent —
+  those apps discard synthetic key events as untrusted, so nothing pasted even
+  though xdotool reported success. The paste key now goes through xdotool's
+  XTEST path (indistinguishable from a real key press) after focus is verified.
+- Clicking a history item no longer freezes the palette while the clipboard
+  write runs: the window hides before the image-ownership poll instead of
+  after, so the click always closes it instantly.
+- The detached `xclip` used for image paste is now reaped from a background
+  thread, so old instances don't accumulate as zombie processes after their
+  clipboard ownership is superseded.
 
 ## [0.1.1] - 2026-08-08
 
