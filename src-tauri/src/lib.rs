@@ -78,25 +78,20 @@ fn copy_item(
         let store = state.lock().unwrap();
         store.get(&id).ok_or_else(|| "item not found".to_string())?
     };
+    // Copying an item just re-emits it to the clipboard — it doesn't create new
+    // history. Bumping it via add_text/add_image would re-serialize the entire
+    // history to disk for a no-op write, so don't touch the store at all.
     {
         let mut cb = clipboard.lock().unwrap();
-        if let Some(entry) = item.image.as_ref() {
+        if item.image.is_some() {
             let png = state
                 .lock()
                 .unwrap()
                 .image_bytes(&id)
                 .ok_or_else(|| "image file missing".to_string())?;
             cb.set_image(&png)?;
-            state.lock().unwrap().add_image(
-                &id,
-                &png,
-                entry.width,
-                entry.height,
-                entry.name.clone(),
-            );
         } else {
             cb.set_text(item.text.as_str())?;
-            state.lock().unwrap().add_text(&item.text, &item.kind);
         }
     }
     Ok(())
@@ -147,25 +142,24 @@ fn paste_item(
     // Background-threading this made image and text paste flaky.
     {
         let mut cb = clipboard.lock().unwrap();
-        if let Some(entry) = item.image.as_ref() {
+        if item.image.is_some() {
             let png = state
                 .lock()
                 .unwrap()
                 .image_bytes(&id)
                 .ok_or_else(|| "image file missing".to_string())?;
             cb.set_image(&png)?;
-            state.lock().unwrap().add_image(
-                &id,
-                &png,
-                entry.width,
-                entry.height,
-                entry.name.clone(),
-            );
         } else {
             cb.set_text(item.text.as_str())?;
-            state.lock().unwrap().add_text(&item.text, &item.kind);
         }
     }
+    // Re-pasting an existing item does not change its content, so bump it in
+    // place instead of re-adding it: add_text/add_image re-serialize the whole
+    // history (every item's inline text) to disk on every paste, which is
+    // wasted work that also holds the store lock. bump() skips the write
+    // entirely when the item is already at the top. Runs AFTER the clipboard
+    // lock is released so a slow disk write can't hold up the watcher.
+    state.lock().unwrap().bump(&id);
 
     let prev_window = app.state::<Mutex<Option<String>>>().lock().unwrap().clone();
 

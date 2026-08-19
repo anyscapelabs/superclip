@@ -50,6 +50,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The detached `xclip` used for image paste is now reaped from a background
   thread, so old instances don't accumulate as zombie processes after their
   clipboard ownership is superseded.
+- Pasting or copying an existing item no longer re-serializes the entire
+  `history.json` (every item's inline text body) to disk on every click —
+  `upsert` treated each re-paste as a brand-new capture and paid a full
+  serialize + write for a no-op. Items are now bumped in place via a cheap
+  `bump()` that skips the write when the item is already at the top, and the
+  store mutation runs after the clipboard lock is released so a slow disk
+  write can't hold up the watcher.
+- `xdotool windowactivate --sync`/`windowfocus --sync` and the `key` send now
+  run under a 1.5s watchdog. `--sync` blocks until the WM acknowledges and has
+  no native timeout; a WM/app that never replies used to hang the paste thread
+  forever instead of failing bounded and letting the focus-verification retry
+  recover.
 
 ## [0.1.1] - 2026-08-08
 

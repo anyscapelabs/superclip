@@ -149,6 +149,24 @@ impl Store {
         self.save();
     }
 
+    // Moves an existing item to the top of the list without rewriting its
+    // content — its bytes are unchanged, so this is used when an item is
+    // pasted/copied again. Reordering a re-paste through add_text/add_image
+    // would re-serialize the ENTIRE history (every item's inline text body)
+    // on every single paste; this skips the disk write entirely when the item
+    // is already at the top.
+    pub fn bump(&mut self, id: &str) {
+        if self.history.items.first().is_some_and(|i| i.id == id) {
+            return;
+        }
+        if let Some(pos) = self.history.items.iter().position(|i| i.id == id) {
+            let mut item = self.history.items.remove(pos);
+            item.time = now_ms();
+            self.history.items.insert(0, item);
+            self.save();
+        }
+    }
+
     fn trim(&mut self) {
         let pinned = self.history.items.iter().filter(|i| i.pinned).count();
         let mut unpinned_seen = 0;

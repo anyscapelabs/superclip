@@ -144,6 +144,8 @@ impl ClipboardBackend for X11Backend {
 const FOCUS_SETTLE_DELAY: Duration = Duration::from_millis(100);
 #[cfg(target_os = "linux")]
 const MAX_FOCUS_ATTEMPTS: u32 = 2;
+#[cfg(target_os = "linux")]
+const SYNC_TIMEOUT: Duration = Duration::from_millis(1500);
 
 #[cfg(target_os = "linux")]
 pub fn active_window_id() -> Option<String> {
@@ -182,19 +184,52 @@ fn activate_window(id: &str) {
     // windowactivate --sync blocks until the WM has raised+activated the
     // window; windowfocus --sync then pins X input focus to it so synthetic
     // keys land on the right app. Neither returning Ok proves focus landed —
-    // send_synthetic_paste verifies that separately.
-    let act = std::process::Command::new("xdotool")
-        .args(["windowactivate", "--sync", id])
-        .status();
-    let foc = std::process::Command::new("xdotool")
-        .args(["windowfocus", "--sync", id])
-        .status();
+    // send_synthetic_paste verifies that separately. Both are bounded by a
+    // watchdog: --sync has no native timeout and some WMs/apps never
+    // acknowledge, which would otherwise hang the paste thread forever.
+    let act = run_with_timeout(xdotool("windowactivate", "--sync", id));
+    let foc = run_with_timeout(xdotool("windowfocus", "--sync", id));
     paste_log(&format!(
-        "activate id={id} windowactivate={:?} windowfocus={:?}",
-        act.map(|s| s.success()),
-        foc.map(|s| s.success())
+        "activate id={id} windowactivate={act:?} windowfocus={foc:?}"
     ));
     std::thread::sleep(FOCUS_SETTLE_DELAY);
+}
+
+// Runs an xdotool invocation with a hard deadline. `--sync` variants wait for
+// a WM acknowledgment that never arrives on some setups; killing the child
+// after SYNC_TIMEOUT turns a permanent hang into a bounded failure that the
+// focus-verification retry loop can recover from.
+#[cfg(target_os = "linux")]
+fn run_with_timeout(mut cmd: std::process::Command) -> Option<bool> {
+    let Ok(mut child) = cmd
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return None;
+    };
+    let deadline = std::time::Instant::now() + SYNC_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status.success()),
+            Ok(None) => {
+                if std::time::Instant::now() > deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Some(false);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn xdotool(op: &str, flag: &str, id: &str) -> std::process::Command {
+    let mut c = std::process::Command::new("xdotool");
+    c.args([op, flag, id]);
+    c
 }
 
 #[cfg(target_os = "linux")]
@@ -221,12 +256,13 @@ fn send_synthetic_paste(target: Option<&str>) {
         // picker (active_window_id() failed). Best we can do is paste into
         // whatever currently has focus; keep it explicit in the log.
         paste_log("no target window captured, falling back to ambient focus paste");
-        let key = std::process::Command::new("xdotool")
-            .args(["key", "ctrl+v"])
-            .status();
+        let key = run_with_timeout({
+            let mut c = std::process::Command::new("xdotool");
+            c.args(["key", "ctrl+v"]);
+            c
+        });
         paste_log(&format!(
-            "ambient key status={:?}",
-            key.map(|s| s.success())
+            "ambient key status={key:?}"
         ));
         return;
     };
@@ -257,13 +293,12 @@ fn send_synthetic_paste(target: Option<&str>) {
     // (XTestFakeKeyEvent), which is indistinguishable from a real hardware key
     // press and every app honors. Focus was already verified to be on the
     // target window above, so an XTEST key lands where the user is.
-    let key = std::process::Command::new("xdotool")
-        .args(["key", "ctrl+v"])
-        .status();
-    paste_log(&format!(
-        "key ctrl+v status={:?}",
-        key.map(|s| s.success())
-    ));
+    let key = run_with_timeout({
+        let mut c = std::process::Command::new("xdotool");
+        c.args(["key", "ctrl+v"]);
+        c
+    });
+    paste_log(&format!("key ctrl+v status={key:?}"));
 }
 
 // --- image encode / decode ---------------------------------------------------
