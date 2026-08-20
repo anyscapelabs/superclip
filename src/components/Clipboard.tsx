@@ -16,10 +16,28 @@ interface Props {
 
 function Clipboard({ items, selected, onSelect, onItemClick, onTogglePin, relTime }: Props) {
   const itemRefs = useRef<(HTMLLIElement | null)[]>([]);
+  const lastPointer = useRef({ x: -1, y: -1 });
+  const selectedByPointer = useRef(false);
 
   useEffect(() => {
+    if (selectedByPointer.current) {
+      selectedByPointer.current = false;
+      return;
+    }
     itemRefs.current[selected]?.scrollIntoView({ block: "nearest" });
   }, [selected]);
+
+  const selectOnPointerMove = (index: number, event: React.MouseEvent) => {
+    const { clientX, clientY } = event;
+    const pointerStayedStill =
+      clientX === lastPointer.current.x && clientY === lastPointer.current.y;
+    if (pointerStayedStill) return;
+
+    lastPointer.current = { x: clientX, y: clientY };
+    if (index === selected) return;
+    selectedByPointer.current = true;
+    onSelect(index);
+  };
 
   const headerCls =
     "px-3 pt-2 pb-1 text-xs font-medium uppercase tracking-wider text-white/40";
@@ -28,7 +46,7 @@ function Clipboard({ items, selected, onSelect, onItemClick, onTogglePin, relTim
   let sawRecent = false;
 
   return (
-    <div className="min-h-0 flex-1 overflow-hidden">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <ul className="superclip-scroll min-h-0 flex-1 overflow-y-auto p-1.5 pt-0">
         {items.length === 0 && (
           <li className="px-3 py-2 text-[14px] text-white/35">
@@ -58,8 +76,11 @@ function Clipboard({ items, selected, onSelect, onItemClick, onTogglePin, relTim
               key={item.id}
               ref={(el) => {
                 itemRefs.current[i] = el;
+                return () => {
+                  itemRefs.current[i] = null;
+                };
               }}
-              onMouseEnter={() => onSelect(i)}
+              onMouseMove={(e) => selectOnPointerMove(i, e)}
               onClick={() => onItemClick(item.id)}
               className={`flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2 text-[14px] transition-colors ${
                 selected === i
@@ -96,9 +117,7 @@ function Clipboard({ items, selected, onSelect, onItemClick, onTogglePin, relTim
                 className={`shrink-0 cursor-pointer rounded transition-opacity hover:text-white ${
                   item.pinned
                     ? "text-[#863bff] opacity-100"
-                    : `text-white/40 opacity-0 ${
-                        selected === i ? "opacity-100" : "group-hover:opacity-100"
-                      }`
+                    : `text-white/40 ${selected === i ? "opacity-100" : "opacity-0"}`
                 }`}
               >
                 <FaThumbtack size={13} />

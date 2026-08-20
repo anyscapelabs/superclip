@@ -38,13 +38,15 @@ package managers when building from source.
 
 ## Features
 
-- **Background clipboard watcher** — captures text copies automatically, deduplicated
+- **Background clipboard watcher** — captures text and image copies automatically, deduplicated
 - **Global hotkey** — `Ctrl+Shift+V` opens the history from any app
-- **Instant search** — fuzzy filter across your whole history as you type
+- **Instant search** — fuzzy filter across your whole history as you type, images included by filename
+- **Image support** — screenshots, copied pictures, and image files are kept as PNGs and paste back at full quality
+- **Preview pane** — the selected item is previewed beside the list: images with their dimensions and size, text and code with their full content
 - **Paste anywhere** — paste the selected item back into the app you were in
 - **Pin favorites** — keep frequently used snippets from scrolling off, pinned above recent history
 - **Auto-purge** — history caps at 100 items by default, oldest items drop off
-- **Auto-updates** — signed, checked on demand from the tray
+- **Auto-updates** — signed, checked on demand from the tray, with an opt-in beta channel
 - **Runs at login** — starts quietly into the system tray
 - **Local-only** — no accounts, no sync, no network calls
 - **Cross-platform** — Windows, Linux, and macOS
@@ -72,7 +74,7 @@ bun run tauri build    # produce a release binary
 2. Copy something, anywhere.
 3. Press `Ctrl+Shift+V` to open your history.
 4. Start typing to search; use arrows to navigate, Enter to paste.
-5. Hover an item and click the pin to keep it forever.
+5. Hover an item and click the pin, or press `Ctrl+P`, to keep it forever.
 6. Right-click the tray icon to open Superclip, check for updates, or quit.
 
 **[Full usage guide →](docs/usage.md)**
@@ -83,6 +85,7 @@ bun run tauri build    # produce a release binary
 - New entries are appended to a JSON history file in the app's local data directory.
 - Paste focuses the window you were in and synthesizes `Ctrl+V` (via `xdotool`/XTEST on X11, `ydotool`/`uinput` on Wayland, SendKeys on Windows, System Events on macOS) with focus verification and retry.
 - Text vs code is detected heuristically in the backend.
+- Signed updates are checked on demand; stable pulls GitHub's latest release manifest, and the opt-in beta channel pulls a rolling pre-release manifest instead.
 - The frontend is plain React + Tailwind talking to the Rust backend through Tauri's command API.
 - A global shortcut (via `tauri-plugin-global-shortcut`) toggles the window without needing focus.
 

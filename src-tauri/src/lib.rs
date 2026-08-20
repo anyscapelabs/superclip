@@ -1,4 +1,5 @@
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tauri::{
@@ -8,10 +9,14 @@ use tauri::{
 };
 use tauri_plugin_autostart::ManagerExt;
 
+const FOCUS_ATTEMPTS: u8 = 8;
+const FOCUS_ATTEMPT_DELAY: Duration = Duration::from_millis(40);
+
 mod clipboard;
 mod commands;
 mod detect;
 mod store;
+mod updater;
 mod watcher;
 
 use clipboard::detect_backend;
@@ -26,6 +31,33 @@ fn center_on_primary(win: &tauri::WebviewWindow) -> tauri::Result<()> {
         win.set_position(PhysicalPosition::new(x as i32, y as i32))?;
     }
     Ok(())
+}
+
+fn focus_when_mapped(app: &tauri::AppHandle) {
+    let app = app.clone();
+    let focused = Arc::new(AtomicBool::new(false));
+
+    std::thread::spawn(move || {
+        for _ in 0..FOCUS_ATTEMPTS {
+            let handle = app.clone();
+            let observed = focused.clone();
+            let _ = app.run_on_main_thread(move || {
+                let Some(win) = handle.get_webview_window("main") else {
+                    return;
+                };
+                if win.is_focused().unwrap_or(false) {
+                    observed.store(true, Ordering::Release);
+                } else if win.is_visible().unwrap_or(false) {
+                    let _ = win.set_focus();
+                }
+            });
+
+            std::thread::sleep(FOCUS_ATTEMPT_DELAY);
+            if focused.load(Ordering::Acquire) {
+                return;
+            }
+        }
+    });
 }
 
 fn toggle_window(app: &tauri::AppHandle) -> tauri::Result<()> {
@@ -44,15 +76,12 @@ fn toggle_window(app: &tauri::AppHandle) -> tauri::Result<()> {
             win.set_always_on_top(true)?;
             win.show()?;
             win.set_focus()?;
+            let _ = app.emit("palette-shown", ());
 
             #[cfg(target_os = "macos")]
             let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
 
-            let win_clone = win.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(60));
-                let _ = win_clone.set_focus();
-            });
+            focus_when_mapped(app);
         }
     }
     Ok(())
@@ -90,6 +119,7 @@ pub fn run() {
             app.manage(Mutex::new(detect_backend()));
             app.manage(Mutex::new(crate::clipboard::text::TextClipboard::new()));
             app.manage(Mutex::new(crate::clipboard::image::ImageClipboard::new()));
+            app.manage(crate::updater::PendingUpdate::default());
             watcher::start(app.handle().clone());
 
             if !std::env::args().any(|a| a == "--from-autostart") {
@@ -157,11 +187,14 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_history,
-            commands::copy_item,
             commands::paste_item,
             commands::toggle_pin,
             commands::clear_history,
-            commands::get_image
+            commands::get_image,
+            updater::get_channel,
+            updater::set_channel,
+            updater::check_update,
+            updater::install_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

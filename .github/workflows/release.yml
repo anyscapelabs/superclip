@@ -79,5 +79,5 @@ jobs:
             - **macOS (Intel)**: `.dmg` / `.app` for `x86_64`
             - **Linux**: AppImage / DEB / RPM
           releaseDraft: true
-          prerelease: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
           args: ${{ matrix.platform.args }}

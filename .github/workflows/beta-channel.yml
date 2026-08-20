@@ -1,0 +1,27 @@
+name: Beta channel
+
+on:
+  release:
+    types: [prereleased, released]
+
+jobs:
+  mirror:
+    name: Mirror update manifest to the beta channel
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish latest.json to the rolling beta tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release download "$TAG" --pattern latest.json --dir manifest
+
+          gh release view beta >/dev/null 2>&1 || gh release create beta \
+            --title "Beta channel" \
+            --notes "Rolling update manifest for the Superclip beta channel. Overwritten by CI on every published release — do not delete." \
+            --prerelease
+
+          gh release upload beta manifest/latest.json --clobber

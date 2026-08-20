@@ -4,6 +4,14 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateChannel {
+    #[default]
+    Stable,
+    Beta,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ImageEntry {
     pub path: String,
@@ -30,6 +38,8 @@ pub struct History {
     pub version: u32,
     pub hotkey: String,
     pub items: Vec<ClipItem>,
+    #[serde(default)]
+    pub channel: UpdateChannel,
 }
 
 impl Default for History {
@@ -38,6 +48,7 @@ impl Default for History {
             version: 1,
             hotkey: "CommandOrControl+Shift+V".into(),
             items: vec![],
+            channel: UpdateChannel::default(),
         }
     }
 }
@@ -208,6 +219,15 @@ impl Store {
 
     pub fn get(&self, id: &str) -> Option<ClipItem> {
         self.history.items.iter().find(|i| i.id == id).cloned()
+    }
+
+    pub fn channel(&self) -> UpdateChannel {
+        self.history.channel
+    }
+
+    pub fn set_channel(&mut self, channel: UpdateChannel) {
+        self.history.channel = channel;
+        self.save();
     }
 
     fn cleanup_orphaned_images(&self) {

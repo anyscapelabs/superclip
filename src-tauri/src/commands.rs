@@ -14,11 +14,6 @@ pub fn get_history(state: State<Mutex<Store>>) -> Vec<ClipItem> {
 }
 
 #[tauri::command]
-pub async fn copy_item(id: String, app: AppHandle) -> Result<(), String> {
-    write_item_in_background(id, app).await
-}
-
-#[tauri::command]
 pub async fn paste_item(id: String, app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
@@ -42,21 +37,22 @@ pub fn clear_history(state: State<Mutex<Store>>) {
 }
 
 #[tauri::command]
-pub fn get_image(id: String, state: State<Mutex<Store>>) -> Result<String, String> {
-    use base64::Engine as _;
-
-    let image = state
-        .lock()
-        .unwrap()
-        .image_bytes(&id)
-        .ok_or_else(|| "image not found".to_string())?;
-    Ok(base64::engine::general_purpose::STANDARD.encode(image))
-}
-
-async fn write_item_in_background(id: String, app: AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || write_item(&app, &id))
+pub async fn get_image(id: String, app: AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || encode_image_base64(&app, &id))
         .await
         .map_err(|error| error.to_string())?
+}
+
+fn encode_image_base64(app: &AppHandle, id: &str) -> Result<String, String> {
+    use base64::Engine as _;
+
+    let image = app
+        .state::<Mutex<Store>>()
+        .lock()
+        .unwrap()
+        .image_bytes(id)
+        .ok_or_else(|| "image not found".to_string())?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(image))
 }
 
 async fn write_and_bump_in_background(id: String, app: AppHandle) -> Result<(), String> {
