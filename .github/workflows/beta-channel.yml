@@ -4,6 +4,9 @@ on:
   release:
     types: [prereleased, released]
 
+permissions:
+  contents: read
+
 jobs:
   mirror:
     name: Mirror update manifest to the beta channel

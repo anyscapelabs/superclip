@@ -78,13 +78,8 @@ impl ClipboardWatcher {
 
     fn capture_path_image(&mut self, text: &str) -> bool {
         let looks_like_path = text.starts_with('/') || text.contains("file://");
-        let has_file_payload = looks_like_path
-            && self
-                .backend
-                .get_image_name()
-                .ok()
-                .flatten()
-                .is_some();
+        let has_file_payload =
+            looks_like_path && self.backend.get_image_name().ok().flatten().is_some();
         let Some(path) = image_path_from_text(text, has_file_payload) else {
             return false;
         };
@@ -118,7 +113,13 @@ impl ClipboardWatcher {
             return;
         };
 
-        self.store_image(hash, png, width, height, name.unwrap_or_else(|| "Image".into()));
+        self.store_image(
+            hash,
+            png,
+            width,
+            height,
+            name.unwrap_or_else(|| "Image".into()),
+        );
     }
 
     fn store_file_image(&mut self, path: &Path) -> bool {

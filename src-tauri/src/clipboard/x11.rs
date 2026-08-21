@@ -58,9 +58,7 @@ impl ClipboardBackend for X11Backend {
                 return Ok(());
             }
             // arboard image writes can block behind an unresponsive X11 owner.
-            Err(
-                "xclip image claim failed (clipboard owner did not respond in time)".to_string(),
-            )
+            Err("xclip image claim failed (clipboard owner did not respond in time)".to_string())
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -235,9 +233,7 @@ fn send_synthetic_paste(target: Option<&str>) {
             c.args(["key", "ctrl+v"]);
             c
         });
-        paste_log(&format!(
-            "ambient key status={key:?}"
-        ));
+        paste_log(&format!("ambient key status={key:?}"));
         return;
     };
 

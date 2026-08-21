@@ -23,10 +23,7 @@ impl ImageClipboard {
 
 // Drain both pipes while waiting so xclip cannot block on a full buffer.
 #[cfg(target_os = "linux")]
-pub(crate) fn run_xclip_bounded(
-    args: &[&str],
-    timeout: Duration,
-) -> Option<std::process::Output> {
+pub(crate) fn run_xclip_bounded(args: &[&str], timeout: Duration) -> Option<std::process::Output> {
     use std::io::Read as _;
     let mut child = std::process::Command::new("xclip")
         .args(["-selection", "clipboard"])
@@ -76,7 +73,13 @@ pub(crate) fn run_xclip_bounded(
 #[cfg(target_os = "linux")]
 pub(crate) fn xclip_image() -> Option<Vec<u8>> {
     let targets = clipboard_targets()?;
-    for mime in ["image/jpeg", "image/webp", "image/bmp", "image/gif", "image/tiff"] {
+    for mime in [
+        "image/jpeg",
+        "image/webp",
+        "image/bmp",
+        "image/gif",
+        "image/tiff",
+    ] {
         if !targets.lines().any(|t| t.trim() == mime) {
             continue;
         }
@@ -110,10 +113,7 @@ fn clipboard_targets_short() -> Option<String> {
 
 #[cfg(target_os = "linux")]
 pub(crate) fn set_image_xclip(png: &[u8]) -> bool {
-    let tmp = std::env::temp_dir().join(format!(
-        "superclip-paste-{}.png",
-        std::process::id()
-    ));
+    let tmp = std::env::temp_dir().join(format!("superclip-paste-{}.png", std::process::id()));
     if std::fs::write(&tmp, png).is_err() {
         return false;
     }

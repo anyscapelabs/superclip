@@ -3,8 +3,13 @@ use std::process::{Command, Stdio};
 
 use super::{paste_log, ClipboardBackend};
 
-const SUPPORTED_IMAGE_TYPES: &[&str] =
-    &["image/png", "image/jpeg", "image/webp", "image/bmp", "image/gif"];
+const SUPPORTED_IMAGE_TYPES: &[&str] = &[
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/bmp",
+    "image/gif",
+];
 
 pub struct WaylandBackend;
 
