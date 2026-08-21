@@ -1,12 +1,7 @@
+use std::io::{Cursor, Read};
 use std::time::Duration;
 
 use super::{paste_log, ClipboardBackend};
-
-// --- X11 / default backend ---------------------------------------------------
-// The original Superclip path: arboard for read/write, xdotool for synthetic
-// paste. On non-Linux platforms this same struct forwards to the equivalent OS
-// paste mechanism (SendKeys, osascript), since arboard + OS key-send is the
-// right default everywhere.
 
 pub struct X11Backend {
     clipboard: Option<arboard::Clipboard>,
@@ -15,9 +10,7 @@ pub struct X11Backend {
 impl X11Backend {
     pub fn new() -> Self {
         Self {
-            // Init can fail on headless/Wayland-without-XWayland setups. Store
-            // None and surface the error per-call instead of panicking at boot,
-            // so the watcher and commands degrade gracefully.
+            // Headless and XWayland-free sessions fail per operation, not at startup.
             clipboard: arboard::Clipboard::new().ok(),
         }
     }
@@ -38,6 +31,65 @@ impl ClipboardBackend for X11Backend {
             .ok_or_else(|| "clipboard unavailable (no X11)".to_string())?
             .set_text(text.to_string())
             .map_err(|e| e.to_string())
+    }
+
+    fn get_image(&mut self) -> Result<Option<Vec<u8>>, String> {
+        // xclip covers raster formats arboard does not request on Linux.
+        if let Some(cb) = self.clipboard.as_mut() {
+            if let Ok(img) = cb.get_image() {
+                return encode_png(img.width, img.height, &img.bytes).map(Some);
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            Ok(super::image::xclip_image())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(None)
+        }
+    }
+
+    fn set_image(&mut self, png: &[u8]) -> Result<(), String> {
+        // xclip serves the original PNG without a decode/re-encode cycle.
+        #[cfg(target_os = "linux")]
+        {
+            if super::image::set_image_xclip(png) {
+                return Ok(());
+            }
+            // arboard image writes can block behind an unresponsive X11 owner.
+            Err("xclip image claim failed (clipboard owner did not respond in time)".to_string())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let cb = self
+                .clipboard
+                .as_mut()
+                .ok_or_else(|| "clipboard unavailable (no X11)".to_string())?;
+            let (rgba, width, height) = decode_png(png)?;
+            let img = arboard::ImageData {
+                width,
+                height,
+                bytes: rgba.into(),
+            };
+            cb.set_image(img).map_err(|e| e.to_string())
+        }
+    }
+
+    fn get_image_name(&mut self) -> Result<Option<String>, String> {
+        let Some(cb) = self.clipboard.as_mut() else {
+            return Ok(None);
+        };
+        // Prefer an image path, then preserve the first available filename.
+        match cb.get().file_list() {
+            Ok(files) => Ok(files
+                .iter()
+                .find(|f| super::is_image_file(f))
+                .or_else(|| files.first())
+                .and_then(|f| f.file_name())
+                .map(|n| n.to_string_lossy().into_owned())),
+            Err(_) => Ok(None),
+        }
     }
 
     fn send_paste(&self, target_window: Option<&str>) -> Result<(), String> {
@@ -70,23 +122,16 @@ impl ClipboardBackend for X11Backend {
     }
 }
 
-// --- logging -----------------------------------------------------------------
-
 #[cfg(target_os = "linux")]
 const FOCUS_SETTLE_DELAY: Duration = Duration::from_millis(100);
 #[cfg(target_os = "linux")]
 const MAX_FOCUS_ATTEMPTS: u32 = 2;
+#[cfg(target_os = "linux")]
+const SYNC_TIMEOUT: Duration = Duration::from_millis(1500);
 
 #[cfg(target_os = "linux")]
 pub fn active_window_id() -> Option<String> {
-    // NOTE: a browser window with multiple tabs is a single X11 window — all
-    // tabs share one window id. We can only target the window, not a specific
-    // tab, so a paste lands in whichever tab is focused/visible at paste time.
-    let out = std::process::Command::new("xdotool")
-        .args(["getactivewindow"])
-        .output()
-        .ok()?;
-    let id = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    let id = xdotool_window_id()?;
     if id.is_empty() {
         None
     } else {
@@ -94,48 +139,54 @@ pub fn active_window_id() -> Option<String> {
     }
 }
 
-// Reads WM_CLASS via xprop. Kept (unused) for v0.2 terminal-paste support,
-// which needs it to distinguish terminal apps from GUI apps. Do not delete.
-#[cfg(target_os = "linux")]
-#[allow(dead_code)]
-pub fn window_class(id: &str) -> String {
-    std::process::Command::new("xprop")
-        .args(["-id", id, "WM_CLASS"])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .unwrap_or_default()
-        .trim()
-        .to_lowercase()
-}
-
 #[cfg(target_os = "linux")]
 fn activate_window(id: &str) {
-    // windowactivate --sync blocks until the WM has raised+activated the
-    // window; windowfocus --sync then pins X input focus to it so synthetic
-    // keys land on the right app. Neither returning Ok proves focus landed —
-    // send_synthetic_paste verifies that separately.
-    let act = std::process::Command::new("xdotool")
-        .args(["windowactivate", "--sync", id])
-        .status();
-    let foc = std::process::Command::new("xdotool")
-        .args(["windowfocus", "--sync", id])
-        .status();
+    // --sync waits on the window manager; both calls have a deadline.
+    let act = run_with_timeout(xdotool("windowactivate", "--sync", id));
+    let foc = run_with_timeout(xdotool("windowfocus", "--sync", id));
     paste_log(&format!(
-        "activate id={id} windowactivate={:?} windowfocus={:?}",
-        act.map(|s| s.success()),
-        foc.map(|s| s.success())
+        "activate id={id} windowactivate={act:?} windowfocus={foc:?}"
     ));
     std::thread::sleep(FOCUS_SETTLE_DELAY);
 }
 
+// Bounds xdotool operations that can wait indefinitely for a window manager.
+#[cfg(target_os = "linux")]
+fn run_with_timeout(mut cmd: std::process::Command) -> Option<bool> {
+    let Ok(mut child) = cmd
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return None;
+    };
+    let deadline = std::time::Instant::now() + SYNC_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status.success()),
+            Ok(None) => {
+                if std::time::Instant::now() > deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Some(false);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn xdotool(op: &str, flag: &str, id: &str) -> std::process::Command {
+    let mut c = std::process::Command::new("xdotool");
+    c.args([op, flag, id]);
+    c
+}
+
 #[cfg(target_os = "linux")]
 fn focused_window_id() -> Option<String> {
-    let out = std::process::Command::new("xdotool")
-        .args(["getactivewindow"])
-        .output()
-        .ok()?;
-    let id = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    let id = xdotool_window_id()?;
     paste_log(&format!("getactivewindow => {id:?}"));
     if id.is_empty() {
         None
@@ -144,28 +195,48 @@ fn focused_window_id() -> Option<String> {
     }
 }
 
+// Reading the active window runs on the hotkey path, so it is also bounded.
+#[cfg(target_os = "linux")]
+fn xdotool_window_id() -> Option<String> {
+    let mut child = std::process::Command::new("xdotool")
+        .arg("getactivewindow")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let deadline = std::time::Instant::now() + SYNC_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(Some(_)) | Err(_) => return None,
+            Ok(None) if std::time::Instant::now() > deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+    let mut output = String::new();
+    stdout.read_to_string(&mut output).ok()?;
+    let id = output.trim().to_string();
+    (!id.is_empty()).then_some(id)
+}
+
 #[cfg(target_os = "linux")]
 fn send_synthetic_paste(target: Option<&str>) {
-    // Terminal paste (xclip PRIMARY + middle-click) is deferred to v0.2; this
-    // phase only handles browsers and GUI apps via a synthetic Ctrl+V.
     let Some(id) = target.map(str::trim).filter(|s| !s.is_empty()) else {
-        // We never learned which window the user was in before opening the
-        // picker (active_window_id() failed). Best we can do is paste into
-        // whatever currently has focus; keep it explicit in the log.
         paste_log("no target window captured, falling back to ambient focus paste");
-        let key = std::process::Command::new("xdotool")
-            .args(["key", "ctrl+v"])
-            .status();
-        paste_log(&format!(
-            "ambient key status={:?}",
-            key.map(|s| s.success())
-        ));
+        let key = run_with_timeout({
+            let mut c = std::process::Command::new("xdotool");
+            c.args(["key", "ctrl+v"]);
+            c
+        });
+        paste_log(&format!("ambient key status={key:?}"));
         return;
     };
 
-    // A browser window with multiple tabs is a single X11 window — all tabs
-    // share one window id. We can only target the window, not a specific tab,
-    // so the paste lands in whichever tab is actually focused at paste time.
     let mut attempts: u32 = 0;
     loop {
         attempts += 1;
@@ -182,14 +253,29 @@ fn send_synthetic_paste(target: Option<&str>) {
         }
     }
 
-    // Send Ctrl+V directly to the target window (XSendEvent, so it does not
-    // depend on a keyboard grab / XTEST). Focus was verified above, so this is
-    // belt-and-suspenders on top of a focused-window send.
-    let key = std::process::Command::new("xdotool")
-        .args(["key", "--window", id, "ctrl+v"])
-        .status();
-    paste_log(&format!(
-        "key --window {id} ctrl+v status={:?}",
-        key.map(|s| s.success())
-    ));
+    // Omitting --window selects xdotool's XTEST path.
+    let key = run_with_timeout({
+        let mut c = std::process::Command::new("xdotool");
+        c.args(["key", "ctrl+v"]);
+        c
+    });
+    paste_log(&format!("key ctrl+v status={key:?}"));
+}
+
+fn encode_png(width: usize, height: usize, rgba: &[u8]) -> Result<Vec<u8>, String> {
+    let img = image::RgbaImage::from_raw(width as u32, height as u32, rgba.to_vec())
+        .ok_or_else(|| format!("invalid image dimensions {width}x{height}"))?;
+    let mut buf = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut buf, image::ImageFormat::Png)
+        .map_err(|e| format!("png encode failed: {e}"))?;
+    Ok(buf.into_inner())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn decode_png(png: &[u8]) -> Result<(Vec<u8>, usize, usize), String> {
+    let img = image::load_from_memory(png).map_err(|e| format!("png decode failed: {e}"))?;
+    let rgba = img.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    Ok((rgba.into_raw(), width as usize, height as usize))
 }

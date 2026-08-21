@@ -31,18 +31,22 @@ sudo usermod -aG input $USER   # log out and back in after this
 ```
 
 `ydotool` setup is **optional** — clipboard history still works without it,
-you'll just need to press `Ctrl+V` yourself after picking an item. X11 sessions
-need no extra packages (`xdotool` + `arboard` handle everything there).
+you'll just need to press `Ctrl+V` yourself after picking an item. X11 packages
+include `xclip` (for lossless image serving) and `xdotool` (for auto-paste);
+they are declared for Debian packages and should be installed by other Linux
+package managers when building from source.
 
 ## Features
 
-- **Background clipboard watcher** — captures text copies automatically, deduplicated
+- **Background clipboard watcher** — captures text and image copies automatically, deduplicated
 - **Global hotkey** — `Ctrl+Shift+V` opens the history from any app
-- **Instant search** — fuzzy filter across your whole history as you type
+- **Instant search** — fuzzy filter across your whole history as you type, images included by filename
+- **Image support** — screenshots, copied pictures, and image files are kept as PNGs and paste back at full quality
+- **Preview pane** — the selected item is previewed beside the list: images with their dimensions and size, text and code with their full content
 - **Paste anywhere** — paste the selected item back into the app you were in
 - **Pin favorites** — keep frequently used snippets from scrolling off, pinned above recent history
 - **Auto-purge** — history caps at 100 items by default, oldest items drop off
-- **Auto-updates** — signed, checked on demand from the tray
+- **Auto-updates** — signed, checked on demand from the tray, with an opt-in beta channel
 - **Runs at login** — starts quietly into the system tray
 - **Local-only** — no accounts, no sync, no network calls
 - **Cross-platform** — Windows, Linux, and macOS
@@ -50,7 +54,7 @@ need no extra packages (`xdotool` + `arboard` handle everything there).
 
 ## Why
 
-Most clipboard managers are either bloated Electron apps or push cloud sync you never wanted. Superclip is built with [Tauri](https://tauri.app): a native app with a ~10–15MB footprint, low idle RAM, and no background telemetry. Everything lives in a single local JSON file and never leaves your machine.
+Most clipboard managers are either bloated Electron apps or push cloud sync you never wanted. Superclip is built with [Tauri](https://tauri.app): a native app with a ~10–15MB footprint, low idle RAM, and no background telemetry. History metadata lives in a local JSON file and image payloads live beside it; neither leaves your machine.
 
 ## From source
 
@@ -70,17 +74,18 @@ bun run tauri build    # produce a release binary
 2. Copy something, anywhere.
 3. Press `Ctrl+Shift+V` to open your history.
 4. Start typing to search; use arrows to navigate, Enter to paste.
-5. Hover an item and click the pin to keep it forever.
+5. Hover an item and click the pin, or press `Ctrl+P`, to keep it forever.
 6. Right-click the tray icon to open Superclip, check for updates, or quit.
 
 **[Full usage guide →](docs/usage.md)**
 
 ## How it works
 
-- A background thread polls the OS clipboard every ~500ms and hashes each entry to detect changes — via `arboard` on X11 sessions and all other OSes, `wl-paste` on Wayland.
+- A background thread polls the OS clipboard every ~500ms and hashes each entry to detect changes — via `arboard` plus bounded `xclip` fallbacks on X11, and `wl-paste` on Wayland.
 - New entries are appended to a JSON history file in the app's local data directory.
-- Paste focuses the window you were in and synthesizes `Ctrl+V` (via `xdotool`/`XSendEvent` on X11, `ydotool`/`uinput` on Wayland, SendKeys on Windows, System Events on macOS) with focus verification and retry.
+- Paste focuses the window you were in and synthesizes `Ctrl+V` (via `xdotool`/XTEST on X11, `ydotool`/`uinput` on Wayland, SendKeys on Windows, System Events on macOS) with focus verification and retry.
 - Text vs code is detected heuristically in the backend.
+- Signed updates are checked on demand; stable pulls GitHub's latest release manifest, and the opt-in beta channel pulls a rolling pre-release manifest instead.
 - The frontend is plain React + Tailwind talking to the Rust backend through Tauri's command API.
 - A global shortcut (via `tauri-plugin-global-shortcut`) toggles the window without needing focus.
 
@@ -92,7 +97,7 @@ bun run tauri build    # produce a release binary
 - [x] Reliable paste into the app you came from
 - [x] Signed auto-updates
 - [x] Auto-start into the tray
-- [ ] Image clipboard support (screenshots, copied images)
+- [x] Image clipboard support (screenshots, copied images)
 - [ ] Optional encryption at rest for sensitive entries
 - [ ] Per-item expiry (auto-delete after N minutes)
 - [ ] Terminal paste (X11 PRIMARY / middle-click)

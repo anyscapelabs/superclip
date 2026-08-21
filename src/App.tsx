@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import Fuse from "fuse.js";
 import "./App.css";
 import SearchBar from "./components/SearchBar";
 import Clipboard from "./components/Clipboard";
+import Preview from "./components/Preview";
 import Footer from "./components/Footer";
 import type { ClipItem } from "./types";
 
@@ -20,6 +22,25 @@ function App() {
   const [items, setItems] = useState<ClipItem[]>([]);
   const [selected, setSelected] = useState(0);
   const [query, setQuery] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const focusSearch = () => searchRef.current?.focus();
+    focusSearch();
+
+    const unfocus = getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+      if (focused) focusSearch();
+    });
+    const unshown = listen("palette-shown", () => {
+      setQuery("");
+      focusSearch();
+    });
+
+    return () => {
+      unfocus.then((f) => f());
+      unshown.then((f) => f());
+    };
+  }, []);
 
   const refresh = useCallback(async () => {
     setItems(await invoke<ClipItem[]>("get_history"));
@@ -38,7 +59,7 @@ function App() {
     let src = items;
     if (q) {
       const fuse = new Fuse(items, {
-        keys: ["text"],
+        keys: ["text", "image.name"],
         threshold: 0.35,
         ignoreLocation: true,
       });
@@ -59,10 +80,12 @@ function App() {
 
   const paste = useCallback(
     (id: string) => {
-      invoke("paste_item", { id }).then(() => {
-        refresh();
-        setSelected(0);
-      });
+      invoke("paste_item", { id })
+        .then(() => {
+          refresh();
+          setSelected(0);
+        })
+        .catch((e) => console.error("paste_item:", e));
     },
     [refresh],
   );
@@ -88,26 +111,32 @@ function App() {
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "x") {
         e.preventDefault();
         invoke("clear_history").then(refresh);
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p") {
+        e.preventDefault();
+        if (filtered[selected]) togglePin(filtered[selected].id);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [filtered, selected, paste, refresh]);
+  }, [filtered, selected, paste, refresh, togglePin]);
 
   return (
     <main className="app">
       <div className="glass">
         <div className="border-b border-white/5 px-3 pt-4 pb-3">
-          <SearchBar value={query} onChange={setQuery} />
+          <SearchBar ref={searchRef} value={query} onChange={setQuery} />
         </div>
-        <Clipboard
-          items={filtered}
-          selected={selected}
-          onSelect={setSelected}
-          onItemClick={paste}
-          onTogglePin={togglePin}
-          relTime={relTime}
-        />
+        <div className="flex min-h-0 flex-1">
+          <Clipboard
+            items={filtered}
+            selected={selected}
+            onSelect={setSelected}
+            onItemClick={paste}
+            onTogglePin={togglePin}
+            relTime={relTime}
+          />
+          <Preview item={filtered[selected]} />
+        </div>
         <Footer
           count={items.length}
           onPaste={() => filtered[selected] && paste(filtered[selected].id)}
